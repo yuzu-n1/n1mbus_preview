@@ -1,0 +1,21 @@
+# Build output
+build/
+
+# Java build artifacts
+java_build/
+
+# Debug artifacts
+mapping_debug.txt
+
+# Downloaded dependencies (auto-downloaded by CMake)
+libs/*.jar
+
+# Visual Studio user files
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+*.db
+*.ipch
+*.tlog
+*.log

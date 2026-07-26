@@ -1,0 +1,6 @@
+{
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "files.associations": {
+        "*.hpp": "cpp"
+    }
+}
