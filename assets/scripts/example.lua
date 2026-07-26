@@ -2,7 +2,7 @@ return {
     name        = "Example",
     description = "Example script module",
     category    = "Scripts",
-    keybind     = 0x51, -- F key
+    keybind     = key.f,  -- or "f", or 0x46, or key.right_shift
 
     onEnable = function(self)
         print("[Example] enabled")

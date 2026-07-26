@@ -72,9 +72,49 @@ bool ScriptEngine::Initialize() {
     lua_State* L = (lua_State*)m_state;
     luaL_openlibs(L);
 
-    // Register the `module` global table
+    // Register the `module` and `key` global tables
     lua_newtable(L);
     lua_setglobal(L, "module");
+
+    // Key name → VK code mapping
+    lua_newtable(L);
+    struct KeyEntry { const char* name; int vk; };
+    KeyEntry keys[] = {
+        {"backspace",    0x08}, {"tab",       0x09}, {"enter",     0x0D},
+        {"shift",        0x10}, {"ctrl",      0x11}, {"alt",       0x12},
+        {"pause",        0x13}, {"caps",      0x14}, {"escape",    0x1B},
+        {"space",        0x20}, {"page_up",   0x21}, {"page_down", 0x22},
+        {"end",          0x23}, {"home",      0x24},
+        {"left",         0x25}, {"up",        0x26}, {"right",     0x27}, {"down", 0x28},
+        {"print",        0x2A}, {"prtsc",     0x2C}, {"insert",    0x2D}, {"del",  0x2E},
+        {"0", 0x30},{"1", 0x31},{"2", 0x32},{"3", 0x33},{"4", 0x34},
+        {"5", 0x35},{"6", 0x36},{"7", 0x37},{"8", 0x38},{"9", 0x39},
+        {"a", 0x41},{"b", 0x42},{"c", 0x43},{"d", 0x44},{"e", 0x45},
+        {"f", 0x46},{"g", 0x47},{"h", 0x48},{"i", 0x49},{"j", 0x4A},
+        {"k", 0x4B},{"l", 0x4C},{"m", 0x4D},{"n", 0x4E},{"o", 0x4F},
+        {"p", 0x50},{"q", 0x51},{"r", 0x52},{"s", 0x53},{"t", 0x54},
+        {"u", 0x55},{"v", 0x56},{"w", 0x57},{"x", 0x58},{"y", 0x59},{"z", 0x5A},
+        {"numpad_0", 0x60},{"numpad_1", 0x61},{"numpad_2", 0x62},{"numpad_3", 0x63},
+        {"numpad_4", 0x64},{"numpad_5", 0x65},{"numpad_6", 0x66},{"numpad_7", 0x67},
+        {"numpad_8", 0x68},{"numpad_9", 0x69},
+        {"multiply", 0x6A},{"add", 0x6B},{"subtract", 0x6D},{"divide", 0x6F},
+        {"f1",0x70},{"f2",0x71},{"f3",0x72},{"f4",0x73},{"f5",0x74},
+        {"f6",0x75},{"f7",0x76},{"f8",0x77},{"f9",0x78},{"f10",0x79},
+        {"f11",0x7A},{"f12",0x7B},{"f13",0x7C},{"f14",0x7D},{"f15",0x7E},
+        {"scroll", 0x91}, {"numlock", 0x90},
+        {"left_shift", 0xA0},{"right_shift", 0xA1},
+        {"left_ctrl",  0xA2},{"right_ctrl",  0xA3},
+        {"left_alt",   0xA4},{"right_alt",   0xA5},
+        {"semicolon", 0xBA},{"equal", 0xBB},{"comma", 0xBC},{"minus", 0xBD},
+        {"period", 0xBE},{"slash", 0xBF},{"tilde", 0xC0},
+        {"lbracket", 0xDB},{"backslash", 0xDC},{"rbracket", 0xDD},{"quote", 0xDE},
+    };
+    for (auto& k : keys) {
+        lua_pushstring(L, k.name);
+        lua_pushinteger(L, k.vk);
+        lua_settable(L, -3);
+    }
+    lua_setglobal(L, "key");
 
     m_initialized = true;
     return true;
@@ -143,7 +183,17 @@ std::vector<PluginModule*> ScriptEngine::LoadScripts(const std::string& director
         lua_pop(L, 1);
 
         lua_getfield(L, -1, "keybind");
-        if (lua_isinteger(L, -1)) mod->setKeybind((int)lua_tointeger(L, -1));
+        if (lua_isinteger(L, -1)) {
+            mod->setKeybind((int)lua_tointeger(L, -1));
+        } else if (lua_isstring(L, -1)) {
+            // Look up in the key table
+            const char* kname = lua_tostring(L, -1);
+            lua_getglobal(L, "key");
+            lua_getfield(L, -1, kname);
+            if (lua_isinteger(L, -1)) mod->setKeybind((int)lua_tointeger(L, -1));
+            lua_pop(L, 2);
+        }
+        lua_pop(L, 1);
         lua_pop(L, 1);
 
         lua_pop(L, 1); // pop table copy
