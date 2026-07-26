@@ -40,6 +40,7 @@ add_library(n1mbus_dll SHARED
     src_dll/hook.cpp
     src_dll/jni_manager.cpp
     src_dll/gl_ext.cpp
+    src_dll/plugin_loader.cpp
 )
 
 target_include_directories(n1mbus_dll PRIVATE
