@@ -34,6 +34,22 @@ add_library(imgui STATIC
 )
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 
+# Fetch Lua
+FetchContent_Declare(
+  lua
+  URL https://github.com/lua/lua/archive/refs/tags/v5.4.7.tar.gz
+)
+FetchContent_MakeAvailable(lua)
+
+file(GLOB LUA_SOURCES ${lua_SOURCE_DIR}/*.c)
+list(REMOVE_ITEM LUA_SOURCES ${lua_SOURCE_DIR}/lua.c ${lua_SOURCE_DIR}/luac.c)
+add_library(lua STATIC ${LUA_SOURCES})
+target_include_directories(lua PUBLIC ${lua_SOURCE_DIR})
+# Lua uses setjmp
+if(MSVC)
+  target_compile_definitions(lua PRIVATE _CRT_SECURE_NO_WARNINGS LUA_BUILD_AS_DLL)
+endif()
+
 # --- DLL (n1mbus_dll) ---
 add_library(n1mbus_dll SHARED
     src_dll/dllmain.cpp
@@ -41,6 +57,7 @@ add_library(n1mbus_dll SHARED
     src_dll/jni_manager.cpp
     src_dll/gl_ext.cpp
     src_dll/plugin_loader.cpp
+    src_dll/script_engine.cpp
 )
 
 target_include_directories(n1mbus_dll PRIVATE
@@ -48,7 +65,7 @@ target_include_directories(n1mbus_dll PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src_dll/jni
     ${CMAKE_CURRENT_SOURCE_DIR}/src_dll/modules
 )
-target_link_libraries(n1mbus_dll PRIVATE opengl32 minhook imgui user32 gdi32 urlmon)
+target_link_libraries(n1mbus_dll PRIVATE opengl32 minhook imgui lua user32 gdi32 urlmon)
 
 # --- Injector (n1mbus_injector) ---
 add_executable(n1mbus_injector WIN32
@@ -70,6 +87,8 @@ target_include_directories(n1mbus_injector PRIVATE
 add_custom_command(TARGET n1mbus_dll POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:n1mbus_dll>/assets
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_SOURCE_DIR}/assets/scripts $<TARGET_FILE_DIR:n1mbus_dll>/scripts
   COMMENT "Copying assets to build directory"
 )
 
