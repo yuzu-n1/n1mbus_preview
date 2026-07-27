@@ -1157,9 +1157,9 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                     if (g_ModBridgeAssist) g_ModBridgeAssist->setEnabled(g_Toggles[20].value);
 
                                     // Set JNI context for Lua script modules
-                                    SetLuaJniContext(env, mcObj, playerObj);
+                                    //SetLuaJniContext(env, mcObj, playerObj);
                                     ModuleManager::get().tickAll(env, mcObj, playerObj, playerClass);
-                                    ClearLuaJniContext();
+                                    //ClearLuaJniContext();
 
                                     // ESP Logic & TargetHUD crosshair tracking
                                     bool needsTargetTracking = g_Toggles[17].value;
@@ -2764,6 +2764,7 @@ void N1mbusHook::Initialize(HMODULE hModule) {
     }
 
     // Load Lua scripts
+    if (false) { // disabled for crash investigation
     if (!g_ScriptEngine) {
         g_ScriptEngine = std::make_unique<ScriptEngine>();
         g_ScriptEngine->Initialize();
@@ -2775,6 +2776,7 @@ void N1mbusHook::Initialize(HMODULE hModule) {
             char buf[256]; snprintf(buf, sizeof(buf), "[n1mbus] Lua script: %s", m->GetName());
             OutputDebugStringA(buf);
         }
+    }
     }
 }
 
