@@ -83,12 +83,14 @@ target_include_directories(n1mbus_injector PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src_dll
 )
 
-# Copy assets folder to build output
+# Copy assets folder to build output, create plugins/ and scripts/ directories
 add_custom_command(TARGET n1mbus_dll POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:n1mbus_dll>/assets
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_SOURCE_DIR}/assets/scripts $<TARGET_FILE_DIR:n1mbus_dll>/scripts
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    $<TARGET_FILE_DIR:n1mbus_dll>/plugins
   COMMENT "Copying assets to build directory"
 )
 
@@ -133,4 +135,15 @@ if(JAVA_COMPILER AND JAVA_JAR)
   )
 else()
   message(WARNING "javac or jar not found - n1mbus-agent.jar will NOT be built. Run build_java.ps1 manually.")
+endif()
+
+# --- Optional: Test Plugin ---
+option(BUILD_TEST_PLUGIN "Build the example test plugin" OFF)
+if(BUILD_TEST_PLUGIN)
+  add_library(test_plugin SHARED examples/test_plugin/main.cpp)
+  target_include_directories(test_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src_dll)
+  add_custom_command(TARGET test_plugin POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:test_plugin>
+      $<TARGET_FILE_DIR:n1mbus_dll>/plugins/$<TARGET_FILE_NAME:test_plugin>
+  )
 endif()

@@ -37,6 +37,16 @@ public:
         return nullptr;
     }
 
+    // Remove modules matching a predicate (returns count removed).
+    template<typename Pred>
+    int removeIf(Pred pred) {
+        auto it = std::remove_if(m_modules.begin(), m_modules.end(),
+            [&](auto& ptr) { return pred(ptr.get()); });
+        int n = (int)(m_modules.end() - it);
+        m_modules.erase(it, m_modules.end());
+        return n;
+    }
+
     const std::vector<std::unique_ptr<Module>>& all() const { return m_modules; }
 
 private:

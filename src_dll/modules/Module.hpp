@@ -40,6 +40,8 @@ public:
 
     void toggle() { setEnabled(!m_enabled); }
 
+    void setKeybind(int vk) { m_keybind = vk; }
+
 protected:
     std::string m_name;
     bool        m_enabled;

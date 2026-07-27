@@ -25,7 +25,7 @@ std::vector<PopParticle> g_PopParticles;
 
 struct TargetCard {
     DWORD pid = 0;
-    std::string title, version;
+    std::string title, version, exeName;
     float appearAnim = 0.0f;
     bool popping = false;
     float popAnim = 0.0f;
@@ -108,12 +108,13 @@ struct WindowMatchContext { DWORD pid = 0; std::string title; };
 static BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     auto* ctx = (WindowMatchContext*)lParam;
     if (!IsWindowVisible(hwnd)) return TRUE;
-    if (GetWindow(hwnd, GW_OWNER)) return TRUE;
     DWORD pid; GetWindowThreadProcessId(hwnd, &pid);
     if (pid != ctx->pid) return TRUE;
     char t[512] = {}; GetWindowTextA(hwnd, t, sizeof(t));
-    if (t[0]) ctx->title = t;
-    return FALSE;
+    if (!t[0]) return TRUE;
+    // Prefer longer, more descriptive titles over short ones (e.g. "Minecraft 1.8.9" > "javaw.exe")
+    if (strlen(t) > ctx->title.size()) ctx->title = t;
+    return TRUE; // keep looking for better title
 }
 
 static std::string GetWindowTitleForPid(DWORD pid) {
@@ -282,10 +283,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
                 if (it == g_Cards.end()) {
                     TargetCard card;
                     card.pid = cand.pid;
+                    card.exeName = cand.exeName;
                     card.title = cand.title.empty() ? cand.exeName : cand.title;
                     card.version = ExtractVersion(cand.title);
                     if (card.version.empty()) card.version = ExtractVersion(cand.exeName);
                     g_Cards.push_back(card);
+                } else {
+                    if (!cand.title.empty() && it->title == it->exeName) {
+                        it->title = cand.title;
+                        it->version = ExtractVersion(cand.title);
+                    }
                 }
             }
             g_LastRefreshTick = nowTick;

@@ -63,3 +63,8 @@ void UnloadPlugins() {
     }
     g_LoadedPlugins.clear();
 }
+
+std::vector<N1mbusPlugin*> PluginLoader_ReloadAll(const std::string& directory) {
+    UnloadPlugins();
+    return LoadPlugins(directory);
+}

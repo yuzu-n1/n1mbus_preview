@@ -30,6 +30,8 @@ namespace MC_Register {
     static const char* LIVING      = "net/minecraft/entity/EntityLivingBase";
     static const char* MOP_CLS     = "net/minecraft/util/MovingObjectPosition";
     static const char* INV_CLS     = "net/minecraft/entity/player/InventoryPlayer";
+    static const char* NET_HANDLER = "net/minecraft/client/network/NetHandlerPlayClient";
+    static const char* NET_PLAYER_INFO = "net/minecraft/client/network/NetworkPlayerInfo";
 
     inline void all() {
 
@@ -194,6 +196,14 @@ namespace MC_Register {
             {ENTITY, "pk"}, "F",
             {"field_70125_A", "rotationPitch"});
 
+        MC::registerField("Entity.prevRotationYaw",
+            {ENTITY, "pk"}, "F",
+            {"field_70176_d", "prevRotationYaw"});
+
+        MC::registerField("Entity.prevRotationPitch",
+            {ENTITY, "pk"}, "F",
+            {"field_70173_aa", "prevRotationPitch"});
+
         MC::registerField("Entity.width",
             {ENTITY, "pk"}, "F",
             {"field_70130_N", "width"});
@@ -265,11 +275,11 @@ namespace MC_Register {
             {"func_70651_bq", "getActivePotionEffects"});
 
         MC::registerMethod("Minecraft.getNetHandler",
-            {"net/minecraft/client/Minecraft", "ave"}, "()Lbcy;",
+            {"net/minecraft/client/Minecraft", "ave"}, ("()L" + std::string(NET_HANDLER) + ";").c_str(),
             {"func_147114_u", "getNetHandler", "u"});
 
         MC::registerMethod("NetHandlerPlayClient.getPlayerInfo",
-            {"net/minecraft/client/network/NetHandlerPlayClient", "bcy"}, "(Ljava/lang/String;)Lbdc;",
+            {"net/minecraft/client/network/NetHandlerPlayClient", "bcy"}, ("(Ljava/lang/String;)L" + std::string(NET_PLAYER_INFO) + ";").c_str(),
             {"func_175104_a", "getPlayerInfo", "a"});
 
         MC::registerMethod("NetworkPlayerInfo.getResponseTime",

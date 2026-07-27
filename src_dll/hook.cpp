@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <unordered_set>
 #include <mutex>
 #include <math.h>
 #include <cstdio>
@@ -23,6 +24,8 @@
 #include "image_loader.hpp"
 
 #include "modules.hpp"
+#include "plugin_loader.hpp"
+#include "script_engine.hpp"
 #pragma comment(lib, "opengl32.lib")
 
 typedef BOOL(WINAPI* twglSwapBuffers)(HDC hDc);
@@ -67,12 +70,16 @@ ImFont* g_ToastFont = nullptr;
 ImFont* g_IconFont = nullptr;
 GLuint g_InfoIconTex = 0;
 GLuint g_PaletteTex = 0;
+GLuint g_BannerTex = 0;
+GLuint g_ReloadIconTex = 0;
+GLuint g_EditIconTex = 0;
+int g_BannerW = 0, g_BannerH = 0;
 int g_InfoIconW = 0, g_InfoIconH = 0;
 
 int g_CurrentTab = 0, g_TargetTab = 0;
 float g_TabSlideAnim = 1.0f;
 float g_IndicatorY = 0.0f, g_IndicatorTargetY = 0.0f;
-float g_TabHoverAnim[4] = {};
+float g_TabHoverAnim[5] = {};
 float g_SectionHeaderAnim = 0.0f;
 float g_MenuScale = 0.0f;
 float g_WidgetStagger[20] = {};
@@ -80,8 +87,10 @@ int g_PrevTab = -1;
 
 struct ToggleState { bool value = false; float anim = 0.0f; };
 ToggleState g_Toggles[25];
-bool g_ExpandStates[9] = { false, false, false, false, false, false, false, false, false };
-float g_ExpandAnims[9] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+static std::map<std::string, ToggleState> g_PluginToggles;
+static ToggleState* GetModToggle(const std::string& name);
+bool g_ExpandStates[10] = { false, false, false, false, false, false, false, false, false, false };
+float g_ExpandAnims[10] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 bool g_ComboOpen[8] = {};
 float g_ComboOpenAnim[8] = {};
 // [0]=KillAura reach  [1]=Fly speed  [2]=Speed mult  [3]=HUD fade
@@ -90,8 +99,8 @@ float g_ComboOpenAnim[8] = {};
 // [11]=TriggerBot Min CPS [12]=TriggerBot Max CPS [13]=TriggerBot Reach
 // [14]=Velocity H  [15]=Velocity V
 // [16]=KillAura Min CPS [17]=KillAura Max CPS [18]=KillAura FOV [19]=KillAura Aim
-// [20]=ArrayList X [21]=ArrayList Y [22]=Reserved [23]=Reserved [24]=Reserved
-float g_SliderVals[25] = {3.0f, 1.0f, 1.5f, 10.0f, 1.0f, 40.0f, 40.0f, 5.0f, 90.0f, 10.0f, 14.0f, 8.0f, 12.0f, 3.0f, 0.0f, 0.0f, 10.0f, 14.0f, 360.0f, 10.0f, -1.0f, 10.0f, 0.0f, 0.0f, 0.0f};
+// [20]=ArrayList X [21]=ArrayList Y [22]=ArrayList Scale [23]=TargetHUD Range [24]=ArrayList Anim Speed
+float g_SliderVals[25] = {3.0f, 1.0f, 1.5f, 10.0f, 1.0f, 40.0f, 40.0f, 5.0f, 90.0f, 10.0f, 14.0f, 8.0f, 12.0f, 3.0f, 0.0f, 0.0f, 10.0f, 14.0f, 360.0f, 10.0f, -1.0f, 10.0f, 0.0f, 64.0f, 1.0f};
 int g_ComboSelections[8] = {};
 float g_Colors[4][4] = {
     {0.26f, 0.56f, 1.0f, 1.0f},
@@ -112,6 +121,9 @@ static class BridgeAssist* g_ModBridgeAssist = nullptr;
 static class TriggerBot* g_ModTriggerBot = nullptr;
 static class Velocity* g_ModVelocity = nullptr;
 
+class ScriptEngine;
+static std::unique_ptr<ScriptEngine> g_ScriptEngine;
+
 std::string g_MCID = "Developer";
 bool g_MCIDFetched = false;
 GLuint g_SkinTexID = 0;
@@ -126,10 +138,28 @@ int g_TargetPing = -1;
 int g_TargetPotionCount = 0;
 float g_TargetInfoAlpha = 0.0f;
 bool g_HasTarget = false;
+bool g_TargetIsPlayer = false;
+bool g_TargetLookAway = false;
+float g_TargetLookAwayTimer = 0.0f;
+int g_LastModuleCount = 0;
 
 GLuint g_TargetSkinTexID = 0;
 
 bool g_IsGuiOpen = false;
+float g_ArrayListGlobalAlpha = 1.0f;
+float g_TargetAttackTimer = 0.0f;
+float g_ArrayListColors[2][4] = {
+    {0.4f, 0.7f, 1.0f, 1.0f},
+    {1.0f, 0.4f, 0.7f, 1.0f}
+};
+struct ModuleFadeState {
+    std::string name;
+    float progress; // 0→1 animation progress (with easing)
+    bool present;
+    bool fadingOut;
+    float alpha; // computed from progress for convenience
+};
+static std::vector<ModuleFadeState> g_ModuleFadeStates;
 
 struct Particle { float x, y, vx, vy, alpha, size; };
 static Particle g_Particles[40];
@@ -290,6 +320,47 @@ static bool AnimatedToggle(const char* label, ToggleState& state, float dt, floa
     dl->AddCircleFilled(ImVec2(knobX, pos.y + 1 + r), knobR, IM_COL32(245,248,252,baseA));
     dl->AddCircle(ImVec2(knobX, pos.y + 1 + r), knobR + 0.5f, IM_COL32(0,0,0,(int)(30*alphaMultiplier)));
     
+    ImGui::PopID();
+    return true;
+}
+
+static bool AnimatedModuleToggle(const char* label, Module* mod, float dt, float alphaMultiplier) {
+    auto& state = g_PluginToggles[mod->getName()];
+    if (auto* ts = GetModToggle(mod->getName())) {
+        state.value = ts->value;
+    } else {
+        state.value = mod->isEnabled();
+    }
+    ImGui::PushID(label);
+    float fullW = ImGui::GetContentRegionAvail().x;
+    if (fullW > 250.0f) fullW = 250.0f;
+    float toggleW = 34.0f, toggleH = 18.0f;
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##row", ImVec2(fullW, 20.0f));
+    bool hovered = ImGui::IsItemHovered();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (ImGui::IsItemClicked()) {
+        if (auto* ts = GetModToggle(mod->getName())) {
+            ts->value = !ts->value;
+        } else {
+            mod->toggle();
+        }
+        state.value = !state.value;
+    }
+    state.anim = Lerp(state.anim, state.value ? 1.0f : 0.0f, dt * 14.0f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    int baseA = (int)(255 * alphaMultiplier);
+    ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
+    dl->AddText(ImVec2(pos.x, pos.y + 2), textCol, label);
+    float toggleX = pos.x + fullW - toggleW;
+    float r = toggleH * 0.5f;
+    ImU32 trackCol = IM_COL32((int)Lerp(35,45,state.anim), (int)Lerp(45,120,state.anim), (int)Lerp(55,180,state.anim), baseA);
+    dl->AddRectFilled(ImVec2(toggleX, pos.y + 1), ImVec2(toggleX + toggleW, pos.y + 1 + toggleH), trackCol, r);
+    if (hovered) dl->AddRectFilled(ImVec2(toggleX, pos.y + 1), ImVec2(toggleX + toggleW, pos.y + 1 + toggleH), IM_COL32(255,255,255,(int)(15*alphaMultiplier)), r);
+    float knobR = toggleH * 0.38f;
+    float knobX = Lerp(toggleX + r, toggleX + toggleW - r, EaseOutBack(state.anim));
+    dl->AddCircleFilled(ImVec2(knobX, pos.y + 1 + r), knobR, IM_COL32(245,248,252,baseA));
+    dl->AddCircle(ImVec2(knobX, pos.y + 1 + r), knobR + 0.5f, IM_COL32(0,0,0,(int)(30*alphaMultiplier)));
     ImGui::PopID();
     return true;
 }
@@ -521,7 +592,115 @@ BOOL WINAPI hk_GetCursorPos(LPPOINT lpPoint) {
 }
 BOOL WINAPI hk_ClipCursor(const RECT* lpRect) { if (g_ShowMenu || g_HudEditorMode) return o_ClipCursor(NULL); return o_ClipCursor(lpRect); }
 
+// ── Keybind helpers ──
+
+struct BindEntry { int vk = 0; };
+static std::map<std::string, BindEntry> g_ModuleBinds;
+
+static const char* VkName(int vk) {
+    switch (vk) {
+        case 0x08: return "BkSp"; case 0x09: return "Tab"; case 0x0D: return "Enter";
+        case 0x10: return "Shift"; case 0x11: return "Ctrl"; case 0x12: return "Alt";
+        case 0x1B: return "Esc"; case 0x20: return "Space";
+        case 0x21: return "PgUp"; case 0x22: return "PgDn";
+        case 0x23: return "End"; case 0x24: return "Home";
+        case 0x25: return "Left"; case 0x26: return "Up"; case 0x27: return "Right"; case 0x28: return "Down";
+        case 0x2D: return "Ins"; case 0x2E: return "Del";
+        default:
+            if (vk >= 0x30 && vk <= 0x39) { static char buf[2]; buf[0] = '0' + (vk - 0x30); buf[1] = 0; return buf; }
+            if (vk >= 0x41 && vk <= 0x5A) { static char buf[2]; buf[0] = 'A' + (vk - 0x41); buf[1] = 0; return buf; }
+            if (vk >= 0x70 && vk <= 0x7B) { static char buf[8]; snprintf(buf, sizeof(buf), "F%d", vk - 0x70 + 1); return buf; }
+            if (vk == 0xA0) return "LShift"; if (vk == 0xA1) return "RShift";
+            if (vk == 0xA2) return "LCtrl";  if (vk == 0xA3) return "RCtrl";
+            if (vk == 0xA4) return "LAlt";   if (vk == 0xA5) return "RAlt";
+            return "?";
+    }
+}
+
+// Map module names to their ToggleState pointer for keybind dispatch
+static ToggleState* GetModToggle(const std::string& name) {
+    struct { const char* name; ToggleState* ts; } map[] = {
+        {"KillAura",    &g_Toggles[0]},  {"Velocity",     &g_Toggles[1]},
+        {"AimAssist",   &g_Toggles[2]},  {"AutoClicker",  &g_Toggles[3]},
+        {"AutoSprint",  &g_Toggles[4]},  {"Fly",          &g_Toggles[5]},
+        {"SprintReset", &g_Toggles[6]},  {"NoFall",       &g_Toggles[7]},
+        {"ESP",         &g_Toggles[8]},  {"TargetHUD",    &g_Toggles[17]},
+        {"Speed",       &g_Toggles[18]}, {"Scaffold",     &g_Toggles[19]},
+        {"BridgeAssist",&g_Toggles[20]}, {"TriggerBot",   &g_Toggles[21]},
+    };
+    for (auto& e : map) if (name == e.name) return e.ts;
+    return nullptr;
+}
+
+static std::string g_BindListening;
+
+static void ModuleKeybindWidget(const std::string& modName, ToggleState* fallbackTs, float dt, float alpha) {
+    auto& entry = g_ModuleBinds[modName];
+    bool listening = (g_BindListening == modName);
+    ImGui::PushID(modName.c_str());
+
+    float fullW = ImGui::GetContentRegionAvail().x;
+    if (fullW > 250.0f) fullW = 250.0f;
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+
+    char label[64];
+    if (listening) snprintf(label, sizeof(label), "Bind: ...");
+    else if (entry.vk) snprintf(label, sizeof(label), "Bind: %s", VkName(entry.vk));
+    else snprintf(label, sizeof(label), "Bind: None");
+
+    ImGui::InvisibleButton("##bindrow", ImVec2(fullW, 18));
+    bool hovered = ImGui::IsItemHovered();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (ImGui::IsItemClicked()) {
+        g_BindListening = listening ? "" : modName;
+    }
+
+    ImU32 col = listening ? IM_COL32(100,200,255,(int)(255*alpha))
+        : hovered ? IM_COL32(180,190,200,(int)(255*alpha))
+        : IM_COL32(140,150,160,(int)(255*alpha));
+    ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x, pos.y), col, label);
+
+    if (!listening && g_EditIconTex) {
+        float iconSize = 14.0f;
+        float textW = ImGui::CalcTextSize(label).x;
+        ImVec2 iconPos(pos.x + textW + 6, pos.y + 2);
+        ImGui::GetWindowDrawList()->AddImage((void*)(intptr_t)g_EditIconTex,
+            iconPos, ImVec2(iconPos.x + iconSize, iconPos.y + iconSize),
+            ImVec2(0,0), ImVec2(1,1),
+            IM_COL32(255,255,255,(int)(180*alpha)));
+    }
+    ImGui::PopID();
+}
+
+// Module* overload – uses Module keybind + fallback ToggleState for dispatch
+static void ModuleKeybindWidget(Module* mod, float dt, float alpha) {
+    (void)mod; (void)dt; (void)alpha; // unused – use string overload
+}
+
+void DispatchKeybinds(int vk) {
+    if (g_ShowMenu || g_HudEditorMode) return;
+    for (auto& [name, entry] : g_ModuleBinds) {
+        if (entry.vk == vk) {
+            if (auto* ts = GetModToggle(name)) {
+                ts->value = !ts->value;
+            }
+        }
+    }
+}
+
 LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_KEYDOWN) {
+        // Bind listening
+        if (!g_BindListening.empty() && g_ShowMenu) {
+            if (wParam == VK_ESCAPE) { g_ModuleBinds[g_BindListening].vk = 0; g_BindListening.clear(); }
+            else {
+                g_ModuleBinds[g_BindListening].vk = (int)wParam;
+                g_BindListening.clear();
+            }
+            return 0;
+        }
+        DispatchKeybinds((int)wParam);
+    }
     if (msg == WM_KEYDOWN && wParam == VK_INSERT) {
         if (g_ShowMenu || g_HudEditorMode) CloseMenu(); else { g_ShowMenu = true; if (o_ClipCursor) o_ClipCursor(NULL); }
     }
@@ -599,10 +778,16 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             ImGuiIO& io = ImGui::GetIO();
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
             ImFontConfig fontCfg; fontCfg.OversampleH = 3; fontCfg.OversampleV = 3;
-            ImFont* loaded = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 18.0f, &fontCfg);
-            if (!loaded) io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f, &fontCfg);
-            
-            g_ToastFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 24.0f, &fontCfg);
+            std::string dllDir = GetModuleDirectory(g_hModule);
+            std::string fontPath = dllDir + "assets\\Outfit\\static\\Outfit-Bold.ttf";
+            ImFont* loaded = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f, &fontCfg);
+            if (!loaded) {
+                fontPath = dllDir + "assets\\Outfit\\Outfit-VariableFont_wght.ttf";
+                loaded = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f, &fontCfg);
+            }
+            if (!loaded) loaded = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f, &fontCfg);
+
+            g_ToastFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 24.0f, &fontCfg);
             if (!g_ToastFont) g_ToastFont = loaded;
 
             static const ImWchar icon_ranges[] = { 0xE000, 0xF8FF, 0 };
@@ -610,30 +795,16 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             g_IconFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segmdl2.ttf", 28.0f, &iconCfg, icon_ranges);
 
             LoadGLExtensions();
-            {
-                std::string dllDir = GetModuleDirectory(g_hModule);
-                g_InfoIconTex = LoadTextureFromFile((dllDir + "assets\\info_circle.png").c_str(), &g_InfoIconW, &g_InfoIconH);
-                g_PaletteTex = LoadTextureFromFile((dllDir + "assets\\palette.png").c_str(), nullptr, nullptr);
-            }
+            g_InfoIconTex = LoadTextureFromFile((dllDir + "assets\\info_circle.png").c_str(), &g_InfoIconW, &g_InfoIconH);
+            g_PaletteTex = LoadTextureFromFile((dllDir + "assets\\palette.png").c_str(), nullptr, nullptr);
+            g_BannerTex = LoadTextureFromFile((dllDir + "assets\\nimbus-banner-1920x721.png").c_str(), &g_BannerW, &g_BannerH);
+            g_ReloadIconTex = LoadTextureFromFile((dllDir + "assets\\reload.png").c_str(), nullptr, nullptr);
+            g_EditIconTex = LoadTextureFromFile((dllDir + "assets\\edit.png").c_str(), nullptr, nullptr);
 
             SetupN1mbusStyle();
             ImGui_ImplWin32_Init(g_hWnd);
             ImGui_ImplOpenGL3_Init();
             g_Initialized = true;
-
-            // Register modules with the manager (only once)
-            if (ModuleManager::get().all().empty()) {
-                g_ModNoFall    = ModuleManager::get().add<NoFall>();
-                g_ModSpeed     = ModuleManager::get().add<Speed>();
-                g_ModKillAura  = ModuleManager::get().add<KillAura>();
-                g_ModScaffold  = ModuleManager::get().add<Scaffold>();
-                g_ModAimAssist = ModuleManager::get().add<AimAssist>();
-                g_ModAutoClicker = ModuleManager::get().add<AutoClicker>();
-                g_ModSprintReset = ModuleManager::get().add<SprintReset>();
-                g_ModBridgeAssist = ModuleManager::get().add<BridgeAssist>();
-                g_ModTriggerBot = ModuleManager::get().add<TriggerBot>();
-                g_ModVelocity = ModuleManager::get().add<Velocity>();
-            }
         }
     }
 
@@ -985,7 +1156,14 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                     if (g_ModSprintReset) g_ModSprintReset->setEnabled(g_Toggles[6].value);
                                     if (g_ModBridgeAssist) g_ModBridgeAssist->setEnabled(g_Toggles[20].value);
 
+                                    // Set JNI context for Lua script modules
+                                    g_luaJniEnv    = env;
+                                    g_luaMcObj     = mcObj;
+                                    g_luaPlayerObj = playerObj;
                                     ModuleManager::get().tickAll(env, mcObj, playerObj, playerClass);
+                                    g_luaJniEnv    = nullptr;
+                                    g_luaMcObj     = nullptr;
+                                    g_luaPlayerObj = nullptr;
 
                                     // ESP Logic & TargetHUD crosshair tracking
                                     bool needsTargetTracking = g_Toggles[17].value;
@@ -1141,7 +1319,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                     if (sizeMeth && getMeth && playerCls && mobCls && animalCls) {
                                                                         int size = env->CallIntMethod(listObj, sizeMeth);
                                                                         dbg_listSize = size;
-                                                                        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+                ImDrawList* dl = ImGui::GetForegroundDrawList();
                                                                         
                                                                         float bestTargetDist2D = 99999.0f;
                                                                         jobject bestTargetObj = nullptr;
@@ -1415,11 +1593,12 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                                     env->DeleteLocalRef(heldItemObj);
                                                                                 }
                                                                             }
-                                                                            // Ping & Potions
-                                                                            g_TargetPing = -1;
-                                                                            g_TargetPotionCount = 0;
-                                                                            
-                                                                            if (env->IsInstanceOf(bestTargetObj, playerCls)) {
+                                                                             // Ping & Potions
+                                                                             g_TargetPing = -1;
+                                                                             g_TargetPotionCount = 0;
+                                                                             g_TargetIsPlayer = env->IsInstanceOf(bestTargetObj, playerCls) ? true : false;
+                                                                             
+                                                                             if (g_TargetIsPlayer) {
                                                                                 jmethodID getNetHandler = MC::methodID(env, mcClass, "Minecraft.getNetHandler");
                                                                                 if (getNetHandler && !g_TargetName.empty()) {
                                                                                     jobject netHandler = env->CallObjectMethod(mcObj, getNetHandler);
@@ -1501,6 +1680,49 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                 }
             }
         }
+
+        // ── Module sync (unconditional, outside JNI block) ──
+        // Must run every frame so module state stays in sync with toggles,
+        // even when needJni is false (e.g., last module just turned off).
+        if (g_ModKillAura) {
+            g_ModKillAura->setEnabled(g_Toggles[0].value);
+            g_ModKillAura->mode  = g_ComboSelections[0];
+            g_ModKillAura->reach = g_SliderVals[0];
+            g_ModKillAura->minCps = (int)g_SliderVals[16];
+            g_ModKillAura->maxCps = (int)g_SliderVals[17];
+            g_ModKillAura->fov = g_SliderVals[18];
+            g_ModKillAura->aimSpeed = g_SliderVals[19];
+        }
+        if (g_ModNoFall)   g_ModNoFall->setEnabled(g_Toggles[7].value);
+        if (g_ModSpeed) {
+            g_ModSpeed->setEnabled(g_Toggles[18].value);
+            g_ModSpeed->mode       = g_ComboSelections[4];
+            g_ModSpeed->multiplier = g_SliderVals[2];
+        }
+        if (g_ModScaffold) g_ModScaffold->setEnabled(g_Toggles[19].value);
+        if (g_ModAimAssist) {
+            g_ModAimAssist->setEnabled(g_Toggles[2].value);
+            g_ModAimAssist->speed = g_SliderVals[7];
+            g_ModAimAssist->fov = g_SliderVals[8];
+        }
+        if (g_ModAutoClicker) {
+            g_ModAutoClicker->setEnabled(g_Toggles[3].value);
+            g_ModAutoClicker->minCps = (int)g_SliderVals[9];
+            g_ModAutoClicker->maxCps = (int)g_SliderVals[10];
+        }
+        if (g_ModTriggerBot) {
+            g_ModTriggerBot->setEnabled(g_Toggles[21].value);
+            g_ModTriggerBot->minCps = (int)g_SliderVals[11];
+            g_ModTriggerBot->maxCps = (int)g_SliderVals[12];
+            g_ModTriggerBot->reach = g_SliderVals[13];
+        }
+        if (g_ModVelocity) {
+            g_ModVelocity->setEnabled(g_Toggles[1].value);
+            g_ModVelocity->horizontal = g_SliderVals[14] / 100.0f;
+            g_ModVelocity->vertical = g_SliderVals[15] / 100.0f;
+        }
+        if (g_ModSprintReset) g_ModSprintReset->setEnabled(g_Toggles[6].value);
+        if (g_ModBridgeAssist) g_ModBridgeAssist->setEnabled(g_Toggles[20].value);
 
         if (g_ShowMenu && o_ClipCursor) o_ClipCursor(NULL);
         
@@ -1645,46 +1867,61 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             }
             ImGui::End(); ImGui::PopStyleVar(); ImGui::PopStyleColor();
         }
-
-        // Target HUD Rendering
-        bool hideHUD = g_IsGuiOpen && !g_HudEditorMode;
-        bool shouldShowHUD = (g_HasTarget || g_HudEditorMode);
-        float thSpeed = g_SliderVals[3] * 0.3f; // Slow down speed multiplier
         
-        // Reset alpha if toggle just turned on so HUD starts fresh
+        // ArrayList rendering (enabled modules list)
+        // Single unified path: ImGui window with NoInputs when menu-closed
+
+        // Target HUD Rendering – 4s attack grace period (left-click only)
+        // g_TargetAttackTimer resets only on LEFT-CLICK + onCrosshair (real attack).
+        // HUD stays visible for 4s after last attack, then fades out.
+        // HUD does NOT show just from looking at an entity – must attack first.
+        bool hideHUD = g_IsGuiOpen && !g_HudEditorMode;
+        float thSpeed = g_SliderVals[3] * 0.3f;
+        
         static bool prevTargetHudToggle = false;
         bool curTargetHudToggle = g_Toggles[17].value;
         if (curTargetHudToggle && !prevTargetHudToggle) {
             g_TargetInfoAlpha = 0.0f;
+            g_TargetAttackTimer = 999.0f; // start hidden, must attack to show
         }
         prevTargetHudToggle = curTargetHudToggle;
         
-        if (shouldShowHUD && !hideHUD && curTargetHudToggle) {
-            g_TargetInfoAlpha += dt * thSpeed;
-        } else {
-            g_TargetInfoAlpha -= dt * (thSpeed * 2.0f); // Pop disappear speed (faster)
+        bool onCrosshair = (g_HasTarget && g_TargetDistance < g_SliderVals[23]);
+        bool leftClickAttack = onCrosshair && ImGui::GetIO().MouseDown[0];
+        
+        // Update attack timer: reset only on attack, count up otherwise
+        if (leftClickAttack && !g_HudEditorMode) {
+            g_TargetAttackTimer = 0.0f;
+        } else if (!g_HudEditorMode) {
+            g_TargetAttackTimer += dt;
         }
-        if (g_TargetInfoAlpha > 1.0f) g_TargetInfoAlpha = 1.0f;
-        if (g_TargetInfoAlpha < 0.0f) g_TargetInfoAlpha = 0.0f;
+        
+        // HUD only shows when attacking or within 4s of last attack
+        bool attackActive = (g_TargetAttackTimer < 4.0f);
+        bool shouldShowHUD = (g_HudEditorMode || (g_HasTarget && (leftClickAttack || attackActive)));
+        
+        // Alpha update
+        if (curTargetHudToggle && shouldShowHUD && !hideHUD) {
+            g_TargetInfoAlpha += dt * thSpeed;
+            if (g_TargetInfoAlpha > 1.0f) g_TargetInfoAlpha = 1.0f;
+        } else {
+            g_TargetInfoAlpha -= dt * (thSpeed * 2.0f);
+            if (g_TargetInfoAlpha < 0.0f) { g_TargetInfoAlpha = 0.0f; g_TargetAttackTimer = 0.0f; }
+        }
 
         if (curTargetHudToggle && g_TargetInfoAlpha > 0.01f && !hideHUD) {
             float alphaAnim = g_TargetInfoAlpha;
             float scaleAnim = 1.0f;
             
             if (shouldShowHUD) {
-                // Bubble creation: scale up with elastic bounce
                 float bounceAnim = EaseOutElastic(alphaAnim);
                 scaleAnim = bounceAnim;
                 if (scaleAnim < 0.01f) scaleAnim = 0.01f;
-                // Fade in quickly
                 alphaAnim = alphaAnim < 0.2f ? (alphaAnim / 0.2f) : 1.0f;
             } else {
-                // Bubble pop: violent expansion like a burst
                 float popT = 1.0f - alphaAnim;
-                // Exponential/Cubic curve so it accelerates outward
                 float popCurve = popT * popT * popT;
-                scaleAnim = 1.0f + (popCurve * 1.2f); // Scales up to 2.2x right before disappearing
-                // Make it fade out even sharper
+                scaleAnim = 1.0f + (popCurve * 1.2f);
                 alphaAnim = alphaAnim * alphaAnim * alphaAnim;
             }
             
@@ -1831,12 +2068,14 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             // Row 2: Ping | Potions
             float infoY2 = infoY + infoFS + 4.0f * thScale;
             char pingText[64];
-            ImU32 pingCol = IM_COL32(150, 150, 150, (int)(200 * alphaAnim)); // gray for NPC
+            ImU32 pingCol = IM_COL32(150, 150, 150, (int)(200 * alphaAnim));
             if (dispPing >= 0) {
                 snprintf(pingText, sizeof(pingText), "%d ms", dispPing);
                 if (dispPing < 100) pingCol = IM_COL32(100, 255, 100, (int)(200 * alphaAnim));
                 else if (dispPing < 200) pingCol = IM_COL32(255, 200, 50, (int)(200 * alphaAnim));
                 else pingCol = IM_COL32(255, 100, 100, (int)(200 * alphaAnim));
+            } else if (g_TargetIsPlayer) {
+                snprintf(pingText, sizeof(pingText), "-- ms");
             } else {
                 snprintf(pingText, sizeof(pingText), "NPC");
             }
@@ -1881,8 +2120,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             ImGui::PopStyleVar(3);
         }
 
-        // ArrayList (Active Modules) Rendering
-        {
+        // ArrayList (Active Modules) Rendering – single ImGui window path
+        if (g_Toggles[22].value) {
             if (g_SliderVals[20] < 0.0f) g_SliderVals[20] = io.DisplaySize.x - 150.0f; // Default X
             if (g_SliderVals[22] < 0.5f) g_SliderVals[22] = 1.0f; // Default Scale
 
@@ -1963,25 +2202,51 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             IM_COL32(18, 18, 18, 190), rounding, bgFlags);
                     }
 
-                    // Pass 2: Single unified right color bar (separate from bg, no overlap)
-                    float hueBar = std::fmod(g_GlobalTime * 0.3f + (float)(n-1) * 0.025f, 1.0f);
-                    float rBar, gBar, bBar;
-                    ImGui::ColorConvertHSVtoRGB(hueBar, 0.7f, 1.0f, rBar, gBar, bBar);
-                    dl->AddRectFilled(
-                        ImVec2(bgRight, rMin2.y), ImVec2(barRight, rMin2.y + totalH),
-                        IM_COL32((int)(rBar*255),(int)(gBar*255),(int)(bBar*255),255),
-                        rounding, ImDrawFlags_RoundCornersRight);
-
-                    // Pass 3: Texts
+                    // Pass 2: Single unified right color bar + Pass 3: Texts (settings-aware)
+                    bool rainbowMode = g_Toggles[24].value;
+                    int gradientMode = g_ComboSelections[5];
+                    float rainbowHue = fmod(g_GlobalTime * (g_SliderVals[24] * 0.3f), 1.0f);
+                    
+                    // Color bar
+                    if (rainbowMode) {
+                        float hueBar = std::fmod(g_GlobalTime * 0.3f + (float)(n-1) * 0.025f, 1.0f);
+                        float rBar, gBar, bBar;
+                        ImGui::ColorConvertHSVtoRGB(hueBar, 0.7f, 1.0f, rBar, gBar, bBar);
+                        dl->AddRectFilled(
+                            ImVec2(bgRight, rMin2.y), ImVec2(barRight, rMin2.y + totalH),
+                            IM_COL32((int)(rBar*255),(int)(gBar*255),(int)(bBar*255),255),
+                            rounding, ImDrawFlags_RoundCornersRight);
+                    } else {
+                        ImVec4& barC1 = *(ImVec4*)g_ArrayListColors[0];
+                        dl->AddRectFilled(
+                            ImVec2(bgRight, rMin2.y), ImVec2(barRight, rMin2.y + totalH),
+                            IM_COL32((int)(barC1.x*255),(int)(barC1.y*255),(int)(barC1.z*255),255),
+                            rounding, ImDrawFlags_RoundCornersRight);
+                    }
+                    
+                    // Texts
                     for (int j = 0; j < n; j++) {
                         float w = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j].c_str()).x;
                         float bLeft = rMin2.x + maxWidth - w;
                         float itemTop = rMin2.y + (float)j * itemH;
-                        float hue = std::fmod(g_GlobalTime * 0.3f + (float)j * 0.05f, 1.0f);
-                        float r, g, b;
-                        ImGui::ColorConvertHSVtoRGB(hue, 0.6f, 1.0f, r, g, b);
-                        dl->AddText(font, fontSize, ImVec2(bLeft + padX, itemTop + padY),
-                            IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255), activeMods[j].c_str());
+                        
+                        ImU32 txtColor;
+                        if (rainbowMode) {
+                            float hue = fmod(rainbowHue + (float)j * 0.08f, 1.0f);
+                            float r, g, b;
+                            ImGui::ColorConvertHSVtoRGB(hue, 0.8f, 1.0f, r, g, b);
+                            txtColor = IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255);
+                        } else if (gradientMode == 1 || gradientMode == 2) {
+                            float t = (float)j / (std::max)(n - 1, 1);
+                            ImVec4& c1 = *(ImVec4*)g_ArrayListColors[0];
+                            ImVec4& c2 = *(ImVec4*)g_ArrayListColors[1];
+                            ImVec4 bc(c1.x + (c2.x-c1.x)*t, c1.y + (c2.y-c1.y)*t, c1.z + (c2.z-c1.z)*t, 1.0f);
+                            txtColor = IM_COL32((int)(bc.x*255),(int)(bc.y*255),(int)(bc.z*255),255);
+                        } else {
+                            ImVec4& base = *(ImVec4*)g_ArrayListColors[0];
+                            txtColor = IM_COL32((int)(base.x*255),(int)(base.y*255),(int)(base.z*255),255);
+                        }
+                        dl->AddText(font, fontSize, ImVec2(bLeft + padX, itemTop + padY), txtColor, activeMods[j].c_str());
                     }
                 }
 
@@ -2079,17 +2344,28 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         gradL, gradR, gradR, gradL
                     );
 
-                    ImGui::SetCursorPos(ImVec2(30, 35));
-                    ImGui::TextColored(ImVec4(0.95f, 0.95f, 1.0f, MAlpha), "N I M B U S");
-                    ImGui::SetCursorPos(ImVec2(30, 58));
-                    ImGui::TextColored(ImVec4(0.3f, 0.45f, 0.55f, MAlpha), "Pre Edition");
-                    dl->AddLine(ImVec2(wp.x + 25, wp.y + 88), ImVec2(wp.x + sidebarW - 25, wp.y + 88), IM_COL32(255, 255, 255, (int)(12 * MAlpha)));
+                    // Banner image at top of sidebar
+                    if (g_BannerTex) {
+                        float bannerW = sidebarW - 40.0f;
+                        float bannerH = bannerW * (float)g_BannerH / (float)g_BannerW;
+                        dl->AddImage((void*)(intptr_t)g_BannerTex,
+                            ImVec2(wp.x + 20, wp.y + 25),
+                            ImVec2(wp.x + 20 + bannerW, wp.y + 25 + bannerH),
+                            ImVec2(0,0), ImVec2(1,1),
+                            IM_COL32(255,255,255,(int)(255*MAlpha)));
+                    } else {
+                        ImGui::SetCursorPos(ImVec2(30, 35));
+                        ImGui::TextColored(ImVec4(0.95f, 0.95f, 1.0f, MAlpha), "N I M B U S");
+                        ImGui::SetCursorPos(ImVec2(30, 58));
+                        ImGui::TextColored(ImVec4(0.3f, 0.45f, 0.55f, MAlpha), "Pre Edition");
+                    }
+                    dl->AddLine(ImVec2(wp.x + 25, wp.y + (g_BannerTex ? 25 + (sidebarW - 40) * g_BannerH / g_BannerW + 15 : 88)), ImVec2(wp.x + sidebarW - 25, wp.y + (g_BannerTex ? 25 + (sidebarW - 40) * g_BannerH / g_BannerW + 15 : 88)), IM_COL32(255, 255, 255, (int)(12 * MAlpha)));
 
-                    const char* tabNames[] = { "Combat", "Movement", "Render", "Misc" };
-                    const char* tabIcons[] = { ">>", "~~", "<>", "::" };
+                    const char* tabNames[] = { "Combat", "Movement", "Render", "Misc", "Plugins" };
+                    const char* tabIcons[] = { ">>", "~~", "<>", "::", "[]" };
                     float tabStartY = 105.0f, tabH = 50.0f;
 
-                    for (int i = 0; i < 4; i++) {
+                    for (int i = 0; i < 5; i++) {
                         float itemY = tabStartY + i * tabH;
                         ImVec2 tabMin(wp.x + 8, wp.y + itemY), tabMax(wp.x + sidebarW - 8, wp.y + itemY + tabH - 4);
                         ImGui::SetCursorPos(ImVec2(8, itemY));
@@ -2181,7 +2457,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     float contentAlpha = MAlpha * modAlpha;
 
                     ImGui::SetCursorPos(ImVec2(45 + headerOffsetX, 45));
-                    const char* sectionNames[] = { "COMBAT", "MOVEMENT", "VISUAL", "UTILITY" };
+                    const char* sectionNames[] = { "COMBAT", "MOVEMENT", "VISUAL", "UTILITY", "PLUGINS" };
                     ImVec2 headerPos = ImGui::GetCursorScreenPos();
                     ImGui::TextColored(ImVec4(0.35f, 0.50f, 0.60f, contentAlpha), "%s", sectionNames[g_CurrentTab]);
                     ImVec2 headerSize = ImGui::CalcTextSize(sectionNames[g_CurrentTab]);
@@ -2198,8 +2474,14 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         float wAlpha##idx = contentAlpha * wA##idx; \
                         ImGui::SetCursorPosX(45 + wOff##idx);
 
+                    #define MODULE_BIND(idx, ename) do { \
+                        ImGui::SetCursorPosX(60 + wOff##idx); \
+                        ModuleKeybindWidget(ename, GetModToggle(ename), dt, wAlpha##idx * 0.7f); \
+                    } while(0)
+
                     if (g_CurrentTab == 0) {
                         WIDGET_ANIM(0) AnimatedExpandableToggle("KillAura", g_Toggles[0], dt, wAlpha0, &g_ExpandStates[2], &g_ExpandAnims[2]);
+                        MODULE_BIND(0, "KillAura");
                         if (g_ExpandAnims[2] > 0.01f) {
                             float ea = wAlpha0 * g_ExpandAnims[2];
                             ImGui::Indent(20.0f);
@@ -2215,6 +2497,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                         
                         WIDGET_ANIM(1) AnimatedExpandableToggle("Velocity", g_Toggles[1], dt, wAlpha1, &g_ExpandStates[7], &g_ExpandAnims[7]);
+                        MODULE_BIND(1, "Velocity");
                         if (g_ExpandAnims[7] > 0.01f) {
                             float ea = wAlpha1 * g_ExpandAnims[7];
                             ImGui::Indent(20.0f);
@@ -2225,6 +2508,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                         
                         WIDGET_ANIM(2) AnimatedExpandableToggle("AimAssist", g_Toggles[2], dt, wAlpha2, &g_ExpandStates[5], &g_ExpandAnims[5]);
+                        MODULE_BIND(2, "AimAssist");
                         if (g_ExpandAnims[5] > 0.01f) {
                             float ea = wAlpha2 * g_ExpandAnims[5];
                             ImGui::Indent(20.0f);
@@ -2235,6 +2519,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                         
                         WIDGET_ANIM(3) AnimatedExpandableToggle("AutoClicker", g_Toggles[3], dt, wAlpha3, &g_ExpandStates[6], &g_ExpandAnims[6]);
+                        MODULE_BIND(3, "AutoClicker");
                         if (g_ExpandAnims[6] > 0.01f) {
                             float ea = wAlpha3 * g_ExpandAnims[6];
                             ImGui::Indent(20.0f);
@@ -2245,6 +2530,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                         
                         WIDGET_ANIM(4) AnimatedExpandableToggle("TriggerBot", g_Toggles[21], dt, wAlpha4, &g_ExpandStates[8], &g_ExpandAnims[8]);
+                        MODULE_BIND(4, "TriggerBot");
                         if (g_ExpandAnims[8] > 0.01f) {
                             float ea = wAlpha4 * g_ExpandAnims[8];
                             ImGui::Indent(20.0f);
@@ -2256,11 +2542,11 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                         
                         WIDGET_ANIM(5) AnimatedExpandableToggle("TargetHUD", g_Toggles[17], dt, wAlpha5, &g_ExpandStates[3], &g_ExpandAnims[3]);
+                        MODULE_BIND(5, "TargetHUD");
                         if (g_ExpandAnims[3] > 0.01f) {
                             float ea = wAlpha5 * g_ExpandAnims[3];
                             ImGui::Indent(20.0f);
                             AnimatedSlider("Fade Speed", &g_SliderVals[3], 2.0f, 25.0f, "%.1f", dt, ea); ImGui::Spacing();
-                            if (g_SliderVals[23] < 1.0f) g_SliderVals[23] = 64.0f; // Default range
                             AnimatedSlider("Target Range", &g_SliderVals[23], 5.0f, 100.0f, "%.0fm", dt, ea);
                             ImGui::Unindent(20.0f);
                         }
@@ -2310,6 +2596,21 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             ImGui::Unindent(20.0f);
                         }
                         ImGui::Spacing();
+                        
+                        // ArrayList settings (visual module)
+                        WIDGET_ANIM(2) AnimatedExpandableToggle("ArrayList", g_Toggles[22], dt, wAlpha2, &g_ExpandStates[9], &g_ExpandAnims[9]);
+                        if (g_ExpandAnims[9] > 0.01f) {
+                            float ea = wAlpha2 * g_ExpandAnims[9];
+                            ImGui::Indent(20.0f);
+                            AnimatedToggle("Rainbow Mode", g_Toggles[24], dt, ea); ImGui::Spacing();
+                            static const char* gradOpts[] = { "Off", "Horizontal", "Vertical" };
+                            StyledCombo("Gradient", &g_ComboSelections[5], gradOpts, 3, ea, 5); ImGui::Spacing();
+                            AnimatedSlider("Anim Speed", &g_SliderVals[24], 0.5f, 5.0f, "%.1fx", dt, ea); ImGui::Spacing();
+                            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, ea), "Colors"); MiniColorPicker("##alc1", g_ArrayListColors[0], ea); 
+                            ImGui::SameLine(0, 4); MiniColorPicker("##alc2", g_ArrayListColors[1], ea); ImGui::Spacing();
+                            ImGui::Unindent(20.0f);
+                        }
+                        ImGui::Spacing();
                     } else if (g_CurrentTab == 3) {
                         WIDGET_ANIM(0) AnimatedToggle("AutoTool", g_Toggles[12], dt, wAlpha0); ImGui::Spacing();
                         WIDGET_ANIM(1) static const char* antibot[] = { "Off", "Basic", "Advanced" };
@@ -2325,6 +2626,67 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         }
                         if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                         ImGui::PopStyleColor(4);
+                    } else if (g_CurrentTab == 4) {
+                        auto& mods = ModuleManager::get().all();
+                        // Only show plugin/script modules (wrapped in PluginModuleAdapter)
+                        int idx = 0;
+                        for (auto& m : mods) {
+                            if (!dynamic_cast<PluginModuleAdapter*>(m.get())) continue;
+                            float wa = EaseOutQuint(g_WidgetStagger[idx]);
+                            float wOff = (1.0f - wa) * 20.0f;
+                            float wAlpha = contentAlpha * wa;
+                            ImGui::SetCursorPosX(45 + wOff);
+                            AnimatedModuleToggle(m->getName().c_str(), m.get(), dt, wAlpha);
+                            ImGui::SetCursorPosX(60 + wOff);
+                            ModuleKeybindWidget(m->getName(), GetModToggle(m->getName()), dt, wAlpha * 0.7f);
+                            ImGui::Spacing();
+                            idx++;
+                        }
+                        if (idx == 0) {
+                            ImGui::SetCursorPosX(45);
+                            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, contentAlpha), "No modules");
+                        }
+                        ImGui::Spacing(); ImGui::Spacing();
+                        ImGui::SetCursorPosX(45);
+                        if (g_ReloadIconTex) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0,0,0,0));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.1f));
+                            float iconSize = 20.0f;
+                            ImVec2 rPos = ImGui::GetCursorScreenPos();
+                            if (ImGui::InvisibleButton("##reload", ImVec2(iconSize + 10, iconSize + 10))) {
+                                std::string rDir = GetModuleDirectory(g_hModule);
+                                // Remove old plugin/script modules (keep built-in)
+                                const char* builtin[] = {
+                                    "KillAura","AimAssist","AutoClicker","NoFall","Speed",
+                                    "Scaffold","SprintReset","BridgeAssist","TriggerBot","Velocity"
+                                };
+                                std::unordered_set<std::string> bi;
+                                for (auto& n : builtin) bi.insert(n);
+                                ModuleManager::get().removeIf([&](Module* m) {
+                                    return bi.find(m->getName()) == bi.end();
+                                });
+                                // Reload plugins
+                                auto newPlugins = PluginLoader_ReloadAll(rDir + "\\plugins");
+                                for (auto* plugin : newPlugins) {
+                                    std::vector<PluginModule*> mods;
+                                    plugin->GetModules(mods);
+                                    for (auto* m : mods)
+                                        ModuleManager::get().add<PluginModuleAdapter>(m);
+                                }
+                                // Reload scripts (same Lua state, old refs stay valid)
+                                auto newScripts = g_ScriptEngine->ReloadScripts(rDir + "\\scripts");
+                                for (auto* m : newScripts)
+                                    ModuleManager::get().add<PluginModuleAdapter>(m);
+                            }
+                            bool rHov = ImGui::IsItemHovered();
+                            ImGui::GetWindowDrawList()->AddImage((void*)(intptr_t)g_ReloadIconTex,
+                                rPos, ImVec2(rPos.x + iconSize, rPos.y + iconSize),
+                                ImVec2(0,0), ImVec2(1,1),
+                                IM_COL32(255,255,255,(int)((rHov ? 255 : 180) * contentAlpha)));
+                            ImGui::SameLine();
+                            ImGui::TextColored(ImVec4(0.6f,0.6f,0.6f,contentAlpha*0.8f), "Reload scripts & plugins");
+                            ImGui::PopStyleColor(2);
+                        }
                     }
 
                     ImGui::EndGroup();
@@ -2371,6 +2733,53 @@ void N1mbusHook::Initialize(HMODULE hModule) {
     if (p) { MH_CreateHook(p, (void**)&hk_GetCursorPos, reinterpret_cast<void**>(&o_GetCursorPos)); MH_EnableHook(p); }
     p = (void*)GetProcAddress(hUser32, "ClipCursor");
     if (p) { MH_CreateHook(p, (void**)&hk_ClipCursor, reinterpret_cast<void**>(&o_ClipCursor)); MH_EnableHook(p); }
+
+    // Load C++ plugins
+    char dirBuf[MAX_PATH];
+    GetModuleFileNameA(hModule, dirBuf, MAX_PATH);
+    std::string dllDir = dirBuf;
+    dllDir = dllDir.substr(0, dllDir.find_last_of("\\/"));
+
+    // Register built-in modules (always, before plugins/scripts)
+    if (ModuleManager::get().all().empty()) {
+        g_ModNoFall    = ModuleManager::get().add<NoFall>();
+        g_ModSpeed     = ModuleManager::get().add<Speed>();
+        g_ModKillAura  = ModuleManager::get().add<KillAura>();
+        g_ModScaffold  = ModuleManager::get().add<Scaffold>();
+        g_ModAimAssist = ModuleManager::get().add<AimAssist>();
+        g_ModAutoClicker = ModuleManager::get().add<AutoClicker>();
+        g_ModSprintReset = ModuleManager::get().add<SprintReset>();
+        g_ModBridgeAssist = ModuleManager::get().add<BridgeAssist>();
+        g_ModTriggerBot = ModuleManager::get().add<TriggerBot>();
+        g_ModVelocity = ModuleManager::get().add<Velocity>();
+    }
+
+    auto plugins = LoadPlugins(dllDir + "\\plugins");
+    for (auto* plugin : plugins) {
+        char buf[256]; snprintf(buf, sizeof(buf), "[n1mbus] Plugin loaded: %s", plugin->GetName());
+        OutputDebugStringA(buf);
+        std::vector<PluginModule*> mods;
+        plugin->GetModules(mods);
+        for (auto* m : mods) {
+            ModuleManager::get().add<PluginModuleAdapter>(m);
+            char mBuf[256]; snprintf(mBuf, sizeof(mBuf), "[n1mbus]   Module: %s", m->GetName());
+            OutputDebugStringA(mBuf);
+        }
+    }
+
+    // Load Lua scripts
+    if (!g_ScriptEngine) {
+        g_ScriptEngine = std::make_unique<ScriptEngine>();
+        g_ScriptEngine->Initialize();
+    }
+    {
+        auto luaMods = g_ScriptEngine->LoadScripts(dllDir + "\\scripts");
+        for (auto* m : luaMods) {
+            ModuleManager::get().add<PluginModuleAdapter>(m);
+            char buf[256]; snprintf(buf, sizeof(buf), "[n1mbus] Lua script: %s", m->GetName());
+            OutputDebugStringA(buf);
+        }
+    }
 }
 
 void N1mbusHook::Uninitialize() {

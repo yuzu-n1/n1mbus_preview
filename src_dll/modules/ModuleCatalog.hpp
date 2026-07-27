@@ -73,7 +73,8 @@ public:
 class ArrayList : public Module
 {
 public:
-    ArrayList() : Module("ArrayList") {}
+    ArrayList() : Module("ArrayList") {
+    }
 };
 
 class ClientBrandChanger : public Module
