@@ -394,6 +394,10 @@ namespace MC_Register {
             {ENTITY, "pk"}, "D",
             {"field_70136_U", "lastTickPosZ"});
 
+        MC::registerField("Entity.renderYawOffset",
+            {ENTITY, "pk"}, "F",
+            {"field_70126_B", "renderYawOffset"});
+
     } // all()
 
     // Standalone resolution for Mobs/Animals without fields
