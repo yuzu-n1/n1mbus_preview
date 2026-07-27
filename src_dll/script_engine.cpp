@@ -11,6 +11,18 @@ thread_local void* g_luaJniEnv    = nullptr;
 thread_local void* g_luaMcObj     = nullptr;
 thread_local void* g_luaPlayerObj = nullptr;
 
+void SetLuaJniContext(void* env, void* mcObj, void* playerObj) {
+    g_luaJniEnv    = env;
+    g_luaMcObj     = mcObj;
+    g_luaPlayerObj = playerObj;
+}
+
+void ClearLuaJniContext() {
+    g_luaJniEnv    = nullptr;
+    g_luaMcObj     = nullptr;
+    g_luaPlayerObj = nullptr;
+}
+
 extern "C" {
     #include <lua.h>
     #include <lauxlib.h>

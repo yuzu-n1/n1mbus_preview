@@ -1157,13 +1157,9 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                     if (g_ModBridgeAssist) g_ModBridgeAssist->setEnabled(g_Toggles[20].value);
 
                                     // Set JNI context for Lua script modules
-                                    g_luaJniEnv    = env;
-                                    g_luaMcObj     = mcObj;
-                                    g_luaPlayerObj = playerObj;
+                                    SetLuaJniContext(env, mcObj, playerObj);
                                     ModuleManager::get().tickAll(env, mcObj, playerObj, playerClass);
-                                    g_luaJniEnv    = nullptr;
-                                    g_luaMcObj     = nullptr;
-                                    g_luaPlayerObj = nullptr;
+                                    ClearLuaJniContext();
 
                                     // ESP Logic & TargetHUD crosshair tracking
                                     bool needsTargetTracking = g_Toggles[17].value;

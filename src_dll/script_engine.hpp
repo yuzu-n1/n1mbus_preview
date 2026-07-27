@@ -4,10 +4,10 @@
 
 class PluginModule;
 
-// JNI context for Lua C API – set before calling script OnUpdate
-extern thread_local void* g_luaJniEnv;
-extern thread_local void* g_luaMcObj;
-extern thread_local void* g_luaPlayerObj;
+// Set/clear JNI context for Lua C API on the current thread.
+// Called from the render thread before/after script tick.
+void SetLuaJniContext(void* env, void* mcObj, void* playerObj);
+void ClearLuaJniContext();
 
 // Lua script engine – loads and runs .lua scripts as modules.
 class ScriptEngine {
