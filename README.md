@@ -32,4 +32,4 @@ Scans `java.exe` / `javaw.exe` processes for loaded LWJGL modules. Falls back to
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Custom — see [LICENSE](LICENSE).
