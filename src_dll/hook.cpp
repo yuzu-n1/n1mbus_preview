@@ -1414,6 +1414,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                         g_ModScaffold->setEnabled(g_Toggles[19].value);
                                         g_ModScaffold->tower = g_Toggles[14].value;
                                         g_ModScaffold->expand = g_Toggles[15].value;
+                                        g_ModScaffold->assistView = g_Toggles[35].value;
                                         g_ModScaffold->mode = g_ComboSelections[6];
                                     }
                                     if (g_ModSafeWalk) g_ModSafeWalk->setEnabled(g_Toggles[23].value);
@@ -2054,6 +2055,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             g_ModScaffold->setEnabled(g_Toggles[19].value);
             g_ModScaffold->tower = g_Toggles[14].value;
             g_ModScaffold->expand = g_Toggles[15].value;
+            g_ModScaffold->assistView = g_Toggles[35].value;
             g_ModScaffold->mode = g_ComboSelections[6];
         }
         if (g_ModSafeWalk) g_ModSafeWalk->setEnabled(g_Toggles[23].value);
@@ -3022,10 +3024,13 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             ImGui::Indent(20.0f);
                             static const char* scaffoldModes[] = { "Normal", "Legit", "NoShift", "Tower" };
                             StyledCombo("Mode", &g_ComboSelections[6], scaffoldModes, 4, ea, 6); ImGui::Spacing();
-                            AnimatedSlider("Pitch", &g_ModScaffold->pitch, 50.0f, 90.0f, "%.1f", dt, ea); ImGui::Spacing();
+                            if (g_Toggles[35].value) {
+                                AnimatedSlider("Pitch", &g_ModScaffold->pitch, 50.0f, 90.0f, "%.1f", dt, ea); ImGui::Spacing();
+                            }
                             AnimatedRangeSlider("CPS", &g_ModScaffold->minCps, &g_ModScaffold->maxCps, 1.0f, 25.0f, "%.0f - %.0f", dt, ea); ImGui::Spacing();
                             AnimatedToggle("Tower", g_Toggles[14], dt, ea); ImGui::Spacing();
                             AnimatedToggle("Expand", g_Toggles[15], dt, ea); ImGui::Spacing();
+                            AnimatedToggle("Assist View", g_Toggles[35], dt, ea); ImGui::Spacing();
                             ImGui::Unindent(20.0f);
                         }
                         ImGui::Spacing();

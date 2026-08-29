@@ -16,6 +16,7 @@ public:
     float maxCps      = 12.0f;
     bool  tower       = true;
     bool  expand      = true;
+    bool  assistView  = false; // View assist for fast bridging
 
     Scaffold() : Module("Scaffold") {}
 
@@ -83,6 +84,19 @@ public:
             }
         }
 
+        // ─── View Assist ─────────────────────────────────────────────────
+        if (assistView && (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) {
+            // Snap yaw to nearest 45 degrees
+            float snappedYaw = std::round(curYaw / 45.0f) * 45.0f;
+
+            env->SetFloatField(playerObj, m_yawF, snappedYaw); _ex(env);
+            env->SetFloatField(playerObj, m_pitchF, this->pitch); _ex(env);
+            
+            // Update curYaw/Pitch so the rest of the logic uses the locked angles
+            curYaw = snappedYaw;
+            curPitch = this->pitch;
+        }
+
         // ─── Block placement ─────────────────────────────────────────────
         if (worldObj) {
             PlaceTarget target;
@@ -137,6 +151,25 @@ public:
 
                 env->SetFloatField(playerObj, m_yawF, curYaw); _ex(env);
                 env->SetFloatField(playerObj, m_pitchF, curPitch); _ex(env);
+            }
+
+            // ─── AutoClick when holding right click (OS-level, RIGHTUP pulse) ────────
+            // Send only RIGHTUP while button is physically held.
+            // The physical hold re-registers as RIGHTDOWN automatically -> no conflict.
+            if ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0) {
+                auto now = std::chrono::steady_clock::now();
+                long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastAutoClickTime).count();
+                int range = (int)maxCps - (int)minCps;
+                int cps = (int)minCps + (range > 0 ? (rand() % (range + 1)) : 0);
+                if (cps < 1) cps = 1;
+
+                if (ms >= (1000 / cps)) {
+                    INPUT inp = {};
+                    inp.type = INPUT_MOUSE;
+                    inp.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+                    SendInput(1, &inp, sizeof(INPUT));
+                    m_lastAutoClickTime = now;
+                }
             }
 
             // ─── Tower ───────────────────────────────────────────────────
@@ -221,6 +254,7 @@ private:
     int m_sneakTicks = 0;
 
     std::chrono::steady_clock::time_point m_lastClickTime{};
+    std::chrono::steady_clock::time_point m_lastAutoClickTime{};
 
     struct PlaceTarget {
         double hitX, hitY, hitZ;
@@ -414,6 +448,8 @@ private:
     }
 
     // ─── Edge detection ──────────────────────────────────────────────────
+    // Checks if the player's hitbox (0.6 wide = ±0.3 from center) is over air
+    // at any of the 4 cardinal sides. This works at any altitude.
     bool _isNearEdge(JNIEnv* env, jobject worldObj, jobject playerObj, double px, double py, double pz) {
         if (!m_isAirBlockM || !m_blockPosClassGlobal) return false;
         int ty = (int)std::floor(py) - 1;
@@ -425,19 +461,30 @@ private:
         }
         if (env->ExceptionCheck()) env->ExceptionClear();
 
-        double predX = px + mx * 3.0;
-        double predZ = pz + mz * 3.0;
-        
-        double fracX = px - std::floor(px);
-        double fracZ = pz - std::floor(pz);
-        
-        bool edgeX = (fracX < 0.25 && _isAirBlock(env, worldObj, std::floor(px)-1, ty, std::floor(pz))) || 
-                     (fracX > 0.75 && _isAirBlock(env, worldObj, std::floor(px)+1, ty, std::floor(pz)));
-        bool edgeZ = (fracZ < 0.25 && _isAirBlock(env, worldObj, std::floor(px), ty, std::floor(pz)-1)) || 
-                     (fracZ > 0.75 && _isAirBlock(env, worldObj, std::floor(px), ty, std::floor(pz)+1));
+        // Sample at hitbox edges (player width = 0.6, so half = 0.3, use 0.31 for margin)
+        constexpr double HW = 0.31;
+        bool edgeNeg_X = _isAirBlock(env, worldObj, (int)std::floor(px - HW), ty, (int)std::floor(pz));
+        bool edgePosX  = _isAirBlock(env, worldObj, (int)std::floor(px + HW), ty, (int)std::floor(pz));
+        bool edgeNeg_Z = _isAirBlock(env, worldObj, (int)std::floor(px),      ty, (int)std::floor(pz - HW));
+        bool edgePosZ  = _isAirBlock(env, worldObj, (int)std::floor(px),      ty, (int)std::floor(pz + HW));
+        bool nearEdge = edgeNeg_X || edgePosX || edgeNeg_Z || edgePosZ;
+        if (!nearEdge) return false;
 
+        // Additionally require that the player is actually moving toward the void
+        // (or has velocity toward it). When stationary, if we're on a single scaffold
+        // block and surrounded by air, always sneak.
+        bool allAround = edgeNeg_X && edgePosX && edgeNeg_Z && edgePosZ;
+        if (allAround) return true; // on isolated scaffold block – always sneak
+
+        // Moving toward air?
+        double predX = px + mx * 2.0;
+        double predZ = pz + mz * 2.0;
         bool movingToAir = _isAirBlock(env, worldObj, (int)std::floor(predX), ty, (int)std::floor(predZ));
-        return (edgeX || edgeZ) && movingToAir;
+        // Also check hitbox edge in movement direction
+        bool hitboxMovingToAir =
+            _isAirBlock(env, worldObj, (int)std::floor(px + mx * 2.0 + (mx >= 0 ? HW : -HW)), ty, (int)std::floor(pz)) ||
+            _isAirBlock(env, worldObj, (int)std::floor(px), ty, (int)std::floor(pz + mz * 2.0 + (mz >= 0 ? HW : -HW)));
+        return movingToAir || hitboxMovingToAir;
     }
 
     // ─── Sneak control ───────────────────────────────────────────────────
