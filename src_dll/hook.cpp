@@ -1396,7 +1396,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                     // Sync UI state -> modules, then tick all enabled ones
                                     if (g_ModKillAura) {
                                         g_ModKillAura->setEnabled(g_Toggles[0].value);
-                                        g_ModKillAura->mode  = g_ComboSelections[0];
+                                        g_ModKillAura->mode     = g_ComboSelections[0];
+                                        g_ModKillAura->priority = g_ComboSelections[1];
                                         g_ModKillAura->reach = g_SliderVals[0];
                                         g_ModKillAura->minCps = (int)g_SliderVals[16];
                                         g_ModKillAura->maxCps = (int)g_SliderVals[17];
@@ -2038,7 +2039,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
         // even when needJni is false (e.g., last module just turned off).
         if (g_ModKillAura) {
             g_ModKillAura->setEnabled(g_Toggles[0].value);
-            g_ModKillAura->mode  = g_ComboSelections[0];
+            g_ModKillAura->mode     = g_ComboSelections[0];
+            g_ModKillAura->priority = g_ComboSelections[1];
             g_ModKillAura->reach = g_SliderVals[0];
             g_ModKillAura->minCps = (int)g_SliderVals[16];
             g_ModKillAura->maxCps = (int)g_SliderVals[17];
@@ -2934,6 +2936,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             ImGui::Indent(20.0f);
                             static const char* auraMode[] = { "Single", "Switch", "Multi" };
                             StyledCombo("Mode", &g_ComboSelections[0], auraMode, 3, ea, 0); ImGui::Spacing();
+                            static const char* auraPriority[] = { "Distance", "Health", "Angle" };
+                            StyledCombo("Priority", &g_ComboSelections[1], auraPriority, 3, ea, 1); ImGui::Spacing();
                             AnimatedSlider("Reach", &g_SliderVals[0], 3.0f, 6.0f, "%.1f blocks", dt, ea); ImGui::Spacing();
                             AnimatedSlider("Min CPS", &g_SliderVals[16], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
                             AnimatedSlider("Max CPS", &g_SliderVals[17], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
