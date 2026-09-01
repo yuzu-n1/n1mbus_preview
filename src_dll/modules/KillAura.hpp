@@ -90,6 +90,10 @@ public:
         jfieldID pZf = MC::fieldID(env, entityClass, "Entity.posZ");
         jfieldID yawF = MC::fieldID(env, entityClass, "Entity.rotationYaw");
         jfieldID pitchF = MC::fieldID(env, entityClass, "Entity.rotationPitch");
+        jfieldID prevYawF = MC::fieldID(env, entityClass, "Entity.prevRotationYaw");
+        jfieldID prevPitchF = MC::fieldID(env, entityClass, "Entity.prevRotationPitch");
+        jfieldID yawHeadF = MC::fieldID(env, livingClass, "EntityLivingBase.rotationYawHead");
+        jfieldID renderYawOffsetF = MC::fieldID(env, livingClass, "EntityLivingBase.renderYawOffset");
         _ex(env);
 
         double myX = pXf ? env->GetDoubleField(playerObj, pXf) : 0.0;
@@ -209,17 +213,46 @@ public:
                     break;
                 }
             } else {
+                // ── Multi mode: silent rotation per-entity ───────────────────
                 if (readyToAttack && multiHitCount < 4) {
+                    // Calculate aim angles for this entity
+                    double adx = ex - myX, ady = (ey + 1.0) - (myY + 1.62), adz = ez - myZ;
+                    float aimYaw = (float)(std::atan2(adz, adx) * 180.0 / 3.14159265358979) - 90.0f;
+                    float aimPitch = (float)-(std::atan2(ady, std::sqrt(adx*adx + adz*adz)) * 180.0 / 3.14159265358979);
+
+                    // Save original rotation
+                    float origYaw = yawF ? env->GetFloatField(playerObj, yawF) : 0.0f;
+                    float origPitch = pitchF ? env->GetFloatField(playerObj, pitchF) : 0.0f;
+                    float origPrevYaw = prevYawF ? env->GetFloatField(playerObj, prevYawF) : 0.0f;
+                    float origPrevPitch = prevPitchF ? env->GetFloatField(playerObj, prevPitchF) : 0.0f;
+
+                    // Spoof rotation to target (server-side only)
+                    if (yawF) env->SetFloatField(playerObj, yawF, aimYaw);
+                    if (pitchF) env->SetFloatField(playerObj, pitchF, aimPitch);
+
+                    // If N1mbusAgent is active, notify Netty pipeline for packet interception
+                    _notifyAgentSilentRotation(env, aimYaw, aimPitch);
+
+                    // Attack with spoofed rotation
                     if (swingMeth) env->CallVoidMethod(playerObj, swingMeth);
                     env->CallVoidMethod(controllerObj, attackMeth, playerObj, entObj);
                     _ex(env);
+
+                    // Restore original rotation immediately (client camera untouched)
+                    if (yawF) env->SetFloatField(playerObj, yawF, origYaw);
+                    if (pitchF) env->SetFloatField(playerObj, pitchF, origPitch);
+                    if (prevYawF) env->SetFloatField(playerObj, prevYawF, origPrevYaw);
+                    if (prevPitchF) env->SetFloatField(playerObj, prevPitchF, origPrevPitch);
+
+                    // Update server-visible head/body yaw (other players see aim direction)
+                    if (yawHeadF) env->SetFloatField(playerObj, yawHeadF, aimYaw);
+                    if (renderYawOffsetF) env->SetFloatField(playerObj, renderYawOffsetF, aimYaw);
+
                     multiHitCount++;
                     
                     if (m_getIdMeth) {
                         m_lastTargetId = entId;
                     }
-                    
-                    // Delay CPS calculation until after the loop
                 }
             }
 
@@ -245,9 +278,9 @@ public:
             else m_nextCps = cMin + (rand() % (cMax - cMin + 1));
         }
 
-        // Single / Switch mode logic
+        // Single / Switch mode logic – silent rotation
         if (bestTarget) {
-            // 1. Aim at target
+            // 1. Calculate aim angles toward target
             double ex = env->GetDoubleField(bestTarget, pXf);
             double ey = env->GetDoubleField(bestTarget, pYf) + 1.0;
             double ez = env->GetDoubleField(bestTarget, pZf);
@@ -270,13 +303,27 @@ public:
             stepYaw -= std::fmod(stepYaw, gcd);
             stepPitch -= std::fmod(stepPitch, gcd);
 
-            if (yawF && pitchF) {
-                env->SetFloatField(playerObj, yawF, pYaw + stepYaw);
-                env->SetFloatField(playerObj, pitchF, pPitch + stepPitch);
-            }
+            // Compute the server-side spoofed rotation
+            float serverYaw = pYaw + stepYaw;
+            float serverPitch = pPitch + stepPitch;
 
-            // 2. Attack target if cooldown met
+            // Update m_serverYaw / m_serverPitch for smooth server-side tracking
+            m_serverYaw = serverYaw;
+            m_serverPitch = serverPitch;
+
+            // 2. Attack target if cooldown met (with silent rotation)
             if (readyToAttack) {
+                // Save original rotation (client camera)
+                float origPrevYaw = prevYawF ? env->GetFloatField(playerObj, prevYawF) : 0.0f;
+                float origPrevPitch = prevPitchF ? env->GetFloatField(playerObj, prevPitchF) : 0.0f;
+
+                // Temporarily spoof yaw/pitch for the attack packet
+                if (yawF) env->SetFloatField(playerObj, yawF, serverYaw);
+                if (pitchF) env->SetFloatField(playerObj, pitchF, serverPitch);
+
+                // If N1mbusAgent is active, notify Netty pipeline for packet interception
+                _notifyAgentSilentRotation(env, serverYaw, serverPitch);
+
                 if (swingMeth) {
                     env->CallVoidMethod(playerObj, swingMeth);
                     _ex(env);
@@ -285,6 +332,12 @@ public:
                 // Post attack click
                 env->CallVoidMethod(controllerObj, attackMeth, playerObj, bestTarget);
                 _ex(env);
+
+                // Restore client-side rotation immediately (camera stays unchanged)
+                if (yawF) env->SetFloatField(playerObj, yawF, pYaw);
+                if (pitchF) env->SetFloatField(playerObj, pitchF, pPitch);
+                if (prevYawF) env->SetFloatField(playerObj, prevYawF, origPrevYaw);
+                if (prevPitchF) env->SetFloatField(playerObj, prevPitchF, origPrevPitch);
                 
                 if (m_getIdMeth) {
                     m_lastTargetId = env->CallIntMethod(bestTarget, m_getIdMeth);
@@ -297,6 +350,10 @@ public:
                 if (cMin == cMax) { m_nextCps = cMin; }
                 else m_nextCps = cMin + (rand() % (cMax - cMin + 1));
             }
+
+            // Update server-visible head/body yaw (other players see aim direction)
+            if (yawHeadF) env->SetFloatField(playerObj, yawHeadF, serverYaw);
+            if (renderYawOffsetF) env->SetFloatField(playerObj, renderYawOffsetF, serverYaw);
 
             env->DeleteLocalRef(bestTarget);
         } else {
@@ -319,6 +376,25 @@ private:
     jmethodID m_getIdMeth = nullptr;
     jmethodID m_getHealthMeth = nullptr;
     jmethodID m_isOnSameTeamMeth = nullptr;
+
+    // Silent rotation: server-side spoofed angles (not applied to client camera)
+    float m_serverYaw = 0.0f;
+    float m_serverPitch = 0.0f;
+
+    static void _notifyAgentSilentRotation(JNIEnv* env, float yaw, float pitch) {
+        if (!env) return;
+        jclass agentClass = JniManager::FindClassWithLoader(env, "n1mbus/N1mbusAgent");
+        if (agentClass) {
+            jmethodID setRot = env->GetStaticMethodID(agentClass, "setSilentRotation", "(FF)V");
+            jmethodID setActive = env->GetStaticMethodID(agentClass, "setSilentActive", "(Z)V");
+            if (setRot && setActive) {
+                env->CallStaticVoidMethod(agentClass, setRot, yaw, pitch);
+                env->CallStaticVoidMethod(agentClass, setActive, JNI_TRUE);
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(agentClass);
+        }
+    }
 
     static void _ex(JNIEnv* e) { if (e->ExceptionCheck()) e->ExceptionClear(); }
 
