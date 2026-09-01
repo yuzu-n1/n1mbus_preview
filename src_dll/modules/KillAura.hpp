@@ -162,9 +162,9 @@ public:
 
             if (env->IsSameObject(entObj, playerObj)) { env->DeleteLocalRef(entObj); continue; }
             if (!env->IsInstanceOf(entObj, livingClass)) { env->DeleteLocalRef(entObj); continue; }
-            // if (!env->IsInstanceOf(entObj, playerCls)) { env->DeleteLocalRef(entObj); continue; } // Allow all living entities
+            if (!env->IsInstanceOf(entObj, playerCls)) { env->DeleteLocalRef(entObj); continue; }
             
-            if (teams && env->IsInstanceOf(entObj, playerCls) && MappingResolver::CallIsOnSameTeam(env, playerObj, entObj, entityClass)) {
+            if (teams && MappingResolver::CallIsOnSameTeam(env, playerObj, entObj, entityClass)) {
                 env->DeleteLocalRef(entObj);
                 continue;
             }
