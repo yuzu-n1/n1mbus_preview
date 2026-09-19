@@ -756,7 +756,10 @@ static ToggleState* GetModToggle(const std::string& name) {
         {"SprintReset", &g_Toggles[6]},  {"NoFall",       &g_Toggles[7]},
         {"ESP",         &g_Toggles[8]},  {"TargetHUD",    &g_Toggles[17]},
         {"Speed",       &g_Toggles[18]}, {"Scaffold",     &g_Toggles[19]},
-        {"TriggerBot",  &g_Toggles[21]}, {"BedBreaker",   &g_Toggles[25]}
+        {"SafeWalk",    &g_Toggles[23]}, {"TriggerBot",   &g_Toggles[21]},
+        {"BedBreaker",  &g_Toggles[25]}, {"FakeLag",      &g_Toggles[33]},
+        {"Tracer",      &g_Toggles[28]}, {"ArrayList",    &g_Toggles[22]},
+        {"PlayerModel", &g_Toggles[34]}, {"AutoTool",     &g_Toggles[12]}
     };
     for (auto& e : map) if (name == e.name) return e.ts;
     return nullptr;
@@ -813,6 +816,10 @@ void DispatchKeybinds(int vk) {
         if (entry.vk == vk) {
             if (auto* ts = GetModToggle(name)) {
                 ts->value = !ts->value;
+            } else {
+                for (auto& m : ModuleManager::get().all()) {
+                    if (m && m->getName() == name) { m->toggle(); break; }
+                }
             }
         }
     }
@@ -934,6 +941,11 @@ static void SaveConfig() {
         out << "MaxCps=" << g_ModScaffold->maxCps << "\n";
     }
 
+    out << "[Keybinds]\n";
+    for (auto& [name, entry] : g_ModuleBinds) {
+        out << name << "=" << entry.vk << "\n";
+    }
+
     out.close();
 }
 
@@ -989,6 +1001,10 @@ static void LoadConfig() {
             if (key == "Pitch") g_ModScaffold->pitch = std::stof(val);
             if (key == "MinCps") g_ModScaffold->minCps = std::stof(val);
             if (key == "MaxCps") g_ModScaffold->maxCps = std::stof(val);
+        } else if (section == "Keybinds") {
+            try {
+                g_ModuleBinds[key] = BindEntry{ std::stoi(val) };
+            } catch (...) {}
         }
     }
 }
@@ -1143,7 +1159,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
         bool needJni = !g_MCIDFetched || g_Toggles[4].value || g_Toggles[5].value || wasFlying || espPlayer || espHostile || espPassive || g_Toggles[17].value
                        || g_Toggles[0].value || g_Toggles[7].value || g_Toggles[18].value || g_Toggles[19].value
                        || g_Toggles[2].value || g_Toggles[3].value || g_Toggles[6].value || g_Toggles[21].value || g_Toggles[1].value
-                       || g_Toggles[25].value || g_Toggles[34].value; // BedBreaker, PlayerModel
+                       || g_Toggles[25].value || g_Toggles[34].value || g_Toggles[33].value; // BedBreaker, PlayerModel, FakeLag
         if (needJni) {
             JNIEnv* env = JniManager::GetEnv();
             if (!env) return o_wglSwapBuffers(hDc);
@@ -2087,6 +2103,10 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             g_ModBedBreaker->setEnabled(g_Toggles[25].value);
             g_ModBedBreaker->radius = g_SliderVals[25];
         }
+        if (g_ModFakeLag) {
+            g_ModFakeLag->setEnabled(g_Toggles[33].value);
+            g_ModFakeLag->duration = (int)g_SliderVals[26];
+        }
 
         if (g_ShowMenu && o_ClipCursor) o_ClipCursor(NULL);
         
@@ -2315,7 +2335,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             
             // ALWAYS update position when scaling so the top-left corner moves to keep the center fixed.
             static bool thDragging = false;
-            ImGui::SetNextWindowPos(ImVec2(startX + g_SliderVals[5] - centerOffsetX, startY + g_SliderVals[6] - centerOffsetY), ImGuiCond_Always);
+            ImGui::SetNextWindowPos(ImVec2(startX + g_SliderVals[5] - centerOffsetX, startY + g_SliderVals[6] - centerOffsetY), g_HudEditorMode ? ImGuiCond_Appearing : ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
             
             ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alphaAnim);
@@ -2506,6 +2526,27 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                 }
             }
 
+            // Slide-in animation state. Each enabled module has a progress
+            // 0..1; newly added modules start at 0 and slide/fade in.
+            static std::map<std::string, float> alSlideProg;
+            static std::unordered_set<std::string> alKnown;
+            {
+                float dt = io.DeltaTime;
+                for (auto& name : activeMods) {
+                    // Reset progress to 0 the first frame a module appears
+                    if (!alKnown.count(name)) {
+                        alSlideProg[name] = 0.0f;
+                        alKnown.insert(name);
+                    }
+                    alSlideProg[name] = (std::min)(1.0f, alSlideProg[name] + dt * 6.0f);
+                }
+                for (auto it = alKnown.begin(); it != alKnown.end(); ) {
+                    if (std::find(activeMods.begin(), activeMods.end(), *it) == activeMods.end())
+                        it = alKnown.erase(it);
+                    else ++it;
+                }
+            }
+
             static bool alDragging = false;
             ImGuiWindowFlags alFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground;
             if (!g_HudEditorMode) alFlags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove;
@@ -2557,8 +2598,13 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
 
                     // Pass 1: Per-item backgrounds (stop BEFORE bar area)
                     for (int j = 0; j < n; j++) {
+                        // Slide the new entry in from the right + fade
+                        float prog = alSlideProg[activeMods[j]];
+                        int slideA = (int)(255.0f * prog);
+                        float slideOff = (1.0f - prog) * (contentW + barW);
+
                         float w = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j].c_str()).x;
-                        float bLeft = rMin2.x + maxWidth - w;
+                        float bLeft = rMin2.x + maxWidth - w + slideOff;
                         float itemTop = rMin2.y + (float)j * itemH;
 
                         ImDrawFlags bgFlags = ImDrawFlags_RoundCornersNone;
@@ -2572,7 +2618,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
 
                         dl->AddRectFilled(
                             ImVec2(bLeft, itemTop), ImVec2(bgRight, itemTop + itemH),
-                            IM_COL32(18, 18, 18, 190), rounding, bgFlags);
+                            IM_COL32(18, 18, 18, (int)(190.0f * prog)), rounding, bgFlags);
                     }
 
                     // Pass 2: Single unified right color bar + Pass 3: Texts (settings-aware)
@@ -2599,8 +2645,12 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     
                     // Texts
                     for (int j = 0; j < n; j++) {
+                        float prog = alSlideProg[activeMods[j]];
+                        int slideA = (int)(255.0f * prog);
+                        float slideOff = (1.0f - prog) * (contentW + barW);
+
                         float w = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j].c_str()).x;
-                        float bLeft = rMin2.x + maxWidth - w;
+                        float bLeft = rMin2.x + maxWidth - w + slideOff;
                         float itemTop = rMin2.y + (float)j * itemH;
                         
                         ImU32 txtColor;
@@ -2608,16 +2658,16 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             float hue = fmod(rainbowHue + (float)j * 0.08f, 1.0f);
                             float r, g, b;
                             ImGui::ColorConvertHSVtoRGB(hue, 0.8f, 1.0f, r, g, b);
-                            txtColor = IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),255);
+                            txtColor = IM_COL32((int)(r*255), (int)(g*255), (int)(b*255), slideA);
                         } else if (gradientMode == 1 || gradientMode == 2) {
                             float t = (float)j / (std::max)(n - 1, 1);
                             ImVec4& c1 = *(ImVec4*)g_ArrayListColors[0];
                             ImVec4& c2 = *(ImVec4*)g_ArrayListColors[1];
                             ImVec4 bc(c1.x + (c2.x-c1.x)*t, c1.y + (c2.y-c1.y)*t, c1.z + (c2.z-c1.z)*t, 1.0f);
-                            txtColor = IM_COL32((int)(bc.x*255),(int)(bc.y*255),(int)(bc.z*255),255);
+                            txtColor = IM_COL32((int)(bc.x*255), (int)(bc.y*255), (int)(bc.z*255), slideA);
                         } else {
                             ImVec4& base = *(ImVec4*)g_ArrayListColors[0];
-                            txtColor = IM_COL32((int)(base.x*255),(int)(base.y*255),(int)(base.z*255),255);
+                            txtColor = IM_COL32((int)(base.x*255), (int)(base.y*255), (int)(base.z*255), slideA);
                         }
                         dl->AddText(font, fontSize, ImVec2(bLeft + padX, itemTop + padY), txtColor, activeMods[j].c_str());
                     }
@@ -2994,9 +3044,12 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
 
                     } else if (g_CurrentTab == 1) {
-                        WIDGET_ANIM(0) AnimatedToggle("AutoSprint", g_Toggles[4], dt, wAlpha0); ImGui::Spacing();
+                        WIDGET_ANIM(0) AnimatedToggle("AutoSprint", g_Toggles[4], dt, wAlpha0);
+                        MODULE_BIND(0, "AutoSprint");
+                        ImGui::Spacing();
 
                         WIDGET_ANIM(1) AnimatedExpandableToggle("Flight", g_Toggles[5], dt, wAlpha1, &g_ExpandStates[1], &g_ExpandAnims[1]);
+                        MODULE_BIND(1, "Fly");
                         if (g_ExpandAnims[1] > 0.01f) {
                             float ea = wAlpha1 * g_ExpandAnims[1];
                             ImGui::Indent(20.0f);
@@ -3008,6 +3061,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
 
                         WIDGET_ANIM(2) AnimatedExpandableToggle("Speed", g_Toggles[18], dt, wAlpha2, &g_ExpandStates[4], &g_ExpandAnims[4]);
+                        MODULE_BIND(2, "Speed");
                         if (g_ExpandAnims[4] > 0.01f) {
                             float ea = wAlpha2 * g_ExpandAnims[4];
                             ImGui::Indent(20.0f);
@@ -3018,11 +3072,18 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         }
                         ImGui::Spacing();
 
-                        WIDGET_ANIM(3) AnimatedToggle("SprintReset", g_Toggles[6], dt, wAlpha3); ImGui::Spacing();
-                        WIDGET_ANIM(4) AnimatedToggle("NoFall", g_Toggles[7], dt, wAlpha4); ImGui::Spacing();
+                        WIDGET_ANIM(3) AnimatedToggle("SprintReset", g_Toggles[6], dt, wAlpha3);
+                        MODULE_BIND(3, "SprintReset");
+                        ImGui::Spacing();
+                        WIDGET_ANIM(4) AnimatedToggle("NoFall", g_Toggles[7], dt, wAlpha4);
+                        MODULE_BIND(4, "NoFall");
+                        ImGui::Spacing();
                         
-                        WIDGET_ANIM(7) AnimatedToggle("SafeWalk", g_Toggles[23], dt, contentAlpha * EaseOutQuint(g_WidgetStagger[7])); ImGui::Spacing();
+                        WIDGET_ANIM(7) AnimatedToggle("SafeWalk", g_Toggles[23], dt, contentAlpha * EaseOutQuint(g_WidgetStagger[7]));
+                        MODULE_BIND(7, "SafeWalk");
+                        ImGui::Spacing();
                         WIDGET_ANIM(5) AnimatedExpandableToggle("Scaffold", g_Toggles[19], dt, wAlpha5, &g_ExpandStates[10], &g_ExpandAnims[10]);
+                        MODULE_BIND(5, "Scaffold");
                         if (g_ExpandAnims[10] > 0.01f) {
                             float ea = wAlpha5 * g_ExpandAnims[10];
                             ImGui::Indent(20.0f);
@@ -3040,6 +3101,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 2) {
                         WIDGET_ANIM(0) AnimatedExpandableToggle("ESP", g_Toggles[8], dt, wAlpha0, &g_ExpandStates[0], &g_ExpandAnims[0]);
+                        MODULE_BIND(0, "ESP");
                         if (g_ExpandAnims[0] > 0.01f) {
                             float ea = wAlpha0 * g_ExpandAnims[0];
                             ImGui::Indent(20.0f);
@@ -3058,6 +3120,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                         
                         WIDGET_ANIM(1) AnimatedExpandableToggle("Tracer", g_Toggles[28], dt, wAlpha1, &g_ExpandStates[8], &g_ExpandAnims[8]);
+                        MODULE_BIND(1, "Tracer");
                         if (g_ExpandAnims[8] > 0.01f) {
                             float ea = wAlpha1 * g_ExpandAnims[8];
                             ImGui::Indent(20.0f);
@@ -3071,6 +3134,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         
                         // ArrayList settings (visual module)
                         WIDGET_ANIM(2) AnimatedExpandableToggle("ArrayList", g_Toggles[22], dt, wAlpha2, &g_ExpandStates[9], &g_ExpandAnims[9]);
+                        MODULE_BIND(2, "ArrayList");
                         if (g_ExpandAnims[9] > 0.01f) {
                             float ea = wAlpha2 * g_ExpandAnims[9];
                             ImGui::Indent(20.0f);
@@ -3096,6 +3160,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                         
                         WIDGET_ANIM(4) AnimatedExpandableToggle("PlayerModel", g_Toggles[34], dt, wAlpha4, &g_ExpandStates[13], &g_ExpandAnims[13]);
+                        MODULE_BIND(4, "PlayerModel");
                         if (g_ExpandAnims[13] > 0.01f) {
                             float ea = wAlpha4 * g_ExpandAnims[13];
                             ImGui::Indent(20.0f);
@@ -3104,17 +3169,12 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         }
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 3) {
-                        WIDGET_ANIM(0) AnimatedToggle("AutoTool", g_Toggles[12], dt, wAlpha0); ImGui::Spacing();
+                        WIDGET_ANIM(0) AnimatedToggle("AutoTool", g_Toggles[12], dt, wAlpha0);
+                        MODULE_BIND(0, "AutoTool");
+                        ImGui::Spacing();
                         WIDGET_ANIM(1) static const char* antibot[] = { "Off", "Basic", "Advanced" };
                         StyledCombo("AntiBot", &g_ComboSelections[2], antibot, 3, wAlpha1, 2); ImGui::Spacing();
-                        ImGui::Spacing(); ImGui::Spacing();
-                        WIDGET_ANIM(2)
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.12f, 0.12f, wAlpha2));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.50f, 0.18f, 0.18f, wAlpha2));
-                        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.60f, 0.22f, 0.22f, wAlpha2));
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, wAlpha2));
-                        ImGui::PopStyleColor(4);
-                        ImGui::Spacing(); ImGui::Spacing();
+                        ImGui::Spacing();
                         WIDGET_ANIM(3) AnimatedExpandableToggle("BedBreaker", g_Toggles[25], dt, wAlpha3, &g_ExpandStates[11], &g_ExpandAnims[11]);
                         MODULE_BIND(3, "BedBreaker");
                         if (g_ExpandAnims[11] > 0.01f) {
@@ -3126,6 +3186,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 4) {
                         WIDGET_ANIM(0) AnimatedExpandableToggle("FakeLag", g_Toggles[33], dt, wAlpha0, &g_ExpandStates[12], &g_ExpandAnims[12]);
+                        MODULE_BIND(0, "FakeLag");
                         if (g_ExpandAnims[12] > 0.01f) {
                             float ea = wAlpha0 * g_ExpandAnims[12];
                             ImGui::Indent(20.0f);
@@ -3297,14 +3358,25 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                             glPushAttrib(GL_ALL_ATTRIB_BITS);
                                             glPushMatrix();
                                             
-                                            // Reset basic states that might be weird and ensure textures/depth are on
+                                            // Minimal state reset; let Minecraft's GlStateManager handle
+                                            // textures/lighting internally for the entity render.
                                             glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-                                            glEnable(GL_TEXTURE_2D);
-                                            glEnable(GL_DEPTH_TEST);
-                                            glEnable(GL_COLOR_MATERIAL);
                                             glDisable(GL_BLEND);
                                             glUseProgram(0);
-                                            
+                                            // Clear stale world depth so the model only self-occludes.
+                                            glEnable(GL_DEPTH_TEST);
+                                            glDepthFunc(GL_LEQUAL);
+                                            glClearDepth(1.0);
+                                            glClear(GL_DEPTH_BUFFER_BIT);
+                                            // Tighten the projection around the model (z~50) to maximize depth
+                                            // precision. The -1000..1000 range quantizes depth so thin parts of
+                                            // the model z-fight and show through depending on the view angle.
+                                            glMatrixMode(GL_PROJECTION);
+                                            glPushMatrix();
+                                            glLoadIdentity();
+                                            glOrtho(0, (double)last_viewport[2], (double)last_viewport[3], 0, -300.0, 300.0);
+                                            glMatrixMode(GL_MODELVIEW);
+
                                             env->CallStaticVoidMethod(guiInvClass, drawEntity, 
                                                 g_PlayerModelPosX, 
                                                 g_PlayerModelPosY, 
@@ -3313,7 +3385,10 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                 g_PlayerModelMouseY, 
                                                 playerObj);
                                             if (env->ExceptionCheck()) env->ExceptionClear();
-                                            
+
+                                            glMatrixMode(GL_PROJECTION);
+                                            glPopMatrix();
+                                            glMatrixMode(GL_MODELVIEW);
                                             glPopMatrix();
                                             glPopAttrib();
                                         }

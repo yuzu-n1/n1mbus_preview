@@ -130,12 +130,27 @@ public:
 
         if ((now - m_lastClickTime) < (1000 / m_nextCps)) return;
 
-        // Click
-        POINT pos;
-        GetCursorPos(&pos);
-        ScreenToClient(g_hWnd, &pos);
-        PostMessage(g_hWnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(pos.x, pos.y));
-        PostMessage(g_hWnd, WM_LBUTTONUP, 0, MAKELPARAM(pos.x, pos.y));
+        // Click through the game's own handler. LWJGL2 ignores WM_LBUTTONDOWN and
+        // SendInput gets throttled by Minecraft's leftClickCounter, so the
+        // vanilla clickMouse() is called directly (SendInput fallback).
+        jmethodID clickMeth = nullptr;
+        jclass mcCls2 = env->GetObjectClass(mcObj);
+        if (mcCls2) {
+            clickMeth = env->GetMethodID(mcCls2, Mappings::Minecraft_clickMouse_Name, Mappings::Minecraft_clickMouse_Sig);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(mcCls2);
+        }
+        if (clickMeth) {
+            env->CallVoidMethod(mcObj, clickMeth);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        } else {
+            INPUT in[2] = {};
+            in[0].type = INPUT_MOUSE;
+            in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+            in[1].type = INPUT_MOUSE;
+            in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+            SendInput(2, in, sizeof(INPUT));
+        }
 
         m_lastClickTime = now;
 
