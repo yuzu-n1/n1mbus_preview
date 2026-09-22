@@ -13,6 +13,7 @@ public class N1mbusAgent extends ChannelDuplexHandler {
     public static volatile float targetYaw = 0.0f;
     public static volatile float targetPitch = 0.0f;
     public static volatile boolean silentActive = false;
+    private static final java.util.concurrent.ConcurrentLinkedQueue<QueuedPacket> silentQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     // --- Velocity State ---
     public static volatile boolean velocityEnabled = false;
@@ -136,6 +137,7 @@ public class N1mbusAgent extends ChannelDuplexHandler {
         velocityH = 0.0f;
         velocityV = 0.0f;
         fakeLagEnabled = false;
+        silentQueue.clear();
         flushPacketQueue();
     }
 
@@ -184,13 +186,35 @@ public class N1mbusAgent extends ChannelDuplexHandler {
     public static void injectFromMinecraft(Object minecraft) {
         if (minecraft == null || injected) return;
         try {
-            // Traverse fields of Minecraft to find NetworkManager with a Channel
+            // Traverse fields of Minecraft to find NetworkManager with a Channel.
+            // Depth 1: direct Channel/NetworkManager holders.
+            // Depth 2: NetHandlerPlayClient (1.8) / ClientPlayNetHandler (1.9+)
+            //          -> NetworkManager/Connection holding the Channel.
             for (Field field : minecraft.getClass().getDeclaredFields()) {
-                field.setAccessible(true);
-                Object value = field.get(minecraft);
+                Object value;
+                try {
+                    field.setAccessible(true);
+                    value = field.get(minecraft);
+                } catch (Exception e) { continue; }
                 if (value == null) continue;
                 inject(value);
                 if (injected) return;
+                String cn = value.getClass().getName();
+                if (cn.endsWith("NetHandlerPlayClient") || cn.endsWith("ClientPlayNetHandler")
+                        || cn.endsWith("ClientPacketListener")) {
+                    try {
+                        for (Field f2 : value.getClass().getDeclaredFields()) {
+                            Object v2;
+                            try {
+                                f2.setAccessible(true);
+                                v2 = f2.get(value);
+                            } catch (Exception e) { continue; }
+                            if (v2 == null) continue;
+                            inject(v2);
+                            if (injected) return;
+                        }
+                    } catch (Exception e) { /* continue */ }
+                }
             }
         } catch (Exception e) {
             // Ignore silently
@@ -249,7 +273,8 @@ public class N1mbusAgent extends ChannelDuplexHandler {
             return; // Cancel original send
         }
 
-        if (silentActive && isMovementPacket) {
+        if (silentActive) {
+            if (isMovementPacket) {
                 try {
                     // Cache fields once
                     if (!c03FieldsCached) {
@@ -268,7 +293,20 @@ public class N1mbusAgent extends ChannelDuplexHandler {
                         silentActive = false;
                     }
                 } catch (Exception e) { }
+                super.write(ctx, msg, promise);
+
+                // Flush queued action packets (C02/C0A) so they are sent *after* the new rotation
+                while (!silentQueue.isEmpty()) {
+                    QueuedPacket qp = silentQueue.poll();
+                    super.write(qp.ctx, qp.msg, qp.promise);
+                }
+                return;
+            } else {
+                // Delay non-movement packets (like attacks) until the target rotation is sent
+                silentQueue.add(new QueuedPacket(msg, promise, ctx));
+                return;
             }
+        }
         super.write(ctx, msg, promise);
     }
 

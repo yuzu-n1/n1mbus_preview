@@ -144,6 +144,22 @@ GLint g_Viewport[4] = {0};
 double g_ViewerX = 0, g_ViewerY = 0, g_ViewerZ = 0;
 bool g_MatricesValid = false;
 
+// ST Colors
+float g_STColor1[4] = {1.0f, 0.95f, 0.0f, 1.0f};
+float g_STColor2[4] = {0.26f, 0.56f, 1.0f, 1.0f};
+int g_KillAuraTargetId = -1;
+
+// Combat
+int g_LastAttackedEntityId = -1;
+float g_LastAttackTime = 0.0f;
+std::string g_AttackedTargetName = "";
+
+// Bind / Config
+int g_MenuKey = VK_INSERT;
+bool g_PhysLMBDown = false;
+bool g_PhysRMBDown = false;
+
+
 ImU32 GetColorFromCode(char code) {
     switch (code) {
         case '0': return IM_COL32(0, 0, 0, 255);
@@ -826,19 +842,39 @@ void DispatchKeybinds(int vk) {
 }
 
 LRESULT CALLBACK WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_KEYDOWN) {
-        // Bind listening
-        if (!g_BindListening.empty() && g_ShowMenu) {
-            if (wParam == VK_ESCAPE) { g_ModuleBinds[g_BindListening].vk = 0; g_BindListening.clear(); }
-            else {
-                g_ModuleBinds[g_BindListening].vk = (int)wParam;
-                g_BindListening.clear();
+    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) && GetMessageExtraInfo() != (LPARAM)0xA7C0C112UL) {
+        g_PhysLMBDown = (msg == WM_LBUTTONDOWN);
+    }
+    if ((msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP) && GetMessageExtraInfo() != (LPARAM)0xA7C0C112UL) {
+        g_PhysRMBDown = (msg == WM_RBUTTONDOWN);
+    }
+    
+    if (!g_BindListening.empty() && g_ShowMenu) {
+        if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN) {
+            int key = (int)wParam;
+            if (msg == WM_MBUTTONDOWN) key = VK_MBUTTON;
+            else if (msg == WM_XBUTTONDOWN) key = (HIWORD(wParam) == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+            
+            if (key == VK_ESCAPE) {
+                if (g_BindListening == "__MENUBIND__") { /* dont clear menu key on esc usually, or just default */ }
+                else { g_ModuleBinds[g_BindListening].vk = 0; }
+            } else {
+                if (g_BindListening == "__MENUBIND__") {
+                    g_MenuKey = key;
+                } else {
+                    g_ModuleBinds[g_BindListening].vk = key;
+                }
             }
+            g_BindListening.clear();
             return 0;
         }
+    }
+    
+    if (msg == WM_KEYDOWN) {
         DispatchKeybinds((int)wParam);
     }
-    if (msg == WM_KEYDOWN && wParam == VK_INSERT) {
+    
+    if (msg == WM_KEYDOWN && wParam == g_MenuKey) {
         if (g_ShowMenu || g_HudEditorMode) {
             CloseMenu();
         } else if (!g_IsGuiOpen) {
@@ -946,6 +982,10 @@ static void SaveConfig() {
         out << name << "=" << entry.vk << "\n";
     }
 
+    out << "[STColors]\n";
+    out << "1=" << g_STColor1[0] << "," << g_STColor1[1] << "," << g_STColor1[2] << "," << g_STColor1[3] << "\n";
+    out << "2=" << g_STColor2[0] << "," << g_STColor2[1] << "," << g_STColor2[2] << "," << g_STColor2[3] << "\n";
+
     out.close();
 }
 
@@ -1005,6 +1045,12 @@ static void LoadConfig() {
             try {
                 g_ModuleBinds[key] = BindEntry{ std::stoi(val) };
             } catch (...) {}
+        } else if (section == "STColors") {
+            float r, g, b, a;
+            if (sscanf(val.c_str(), "%f,%f,%f,%f", &r, &g, &b, &a) == 4) {
+                if (key == "1") { g_STColor1[0]=r; g_STColor1[1]=g; g_STColor1[2]=b; g_STColor1[3]=a; }
+                if (key == "2") { g_STColor2[0]=r; g_STColor2[1]=g; g_STColor2[2]=b; g_STColor2[3]=a; }
+            }
         }
     }
 }
@@ -1647,6 +1693,9 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                     
                                                                     if (env->ExceptionCheck()) env->ExceptionClear();
                                                                     
+                                                                    std::string getIdName = MappingResolver::FindMethodFromNames(env, entityClass, {"getEntityId", "func_145782_y", "F"}, "()I");
+                                                                    jmethodID getEntityId = env->GetMethodID(entityClass, getIdName.c_str(), "()I");
+                                                                    
                                                                     dbg_hasFields = (sizeMeth && getMeth && playerCls && mobCls && animalCls);
                                                                     int drawnCount = 0;
                                                                     int playerCount = 0;
@@ -1680,7 +1729,13 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                                     bool tracerPassive = g_Toggles[31].value;
                                                                                     bool drawTracer = tracerEnabled && ((isPlayer && tracerPlayer) || (isHostile && tracerHostile) || (isPassive && tracerPassive));
 
-                                                                                    if (drawESP || drawTracer || (needsTargetTracking && (isPlayer || isHostile || isPassive))) {
+                                                                                    int entId = -1;
+                                                                                    if (getEntityId) {
+                                                                                        entId = env->CallIntMethod(entObj, getEntityId);
+                                                                                        if (env->ExceptionCheck()) env->ExceptionClear();
+                                                                                    }
+                                                                                    bool isShowTarget = (g_Toggles[36].value && entId != -1 && entId == g_KillAuraTargetId);
+                                                                                    if (drawESP || drawTracer || isShowTarget || (needsTargetTracking && (isPlayer || isHostile || isPassive))) {
                                                                                         double x = env->GetDoubleField(entObj, pXField);
                                                                                         double y = env->GetDoubleField(entObj, pYField);
                                                                                         double z = env->GetDoubleField(entObj, pZField);
@@ -1884,6 +1939,117 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                                         }
                                                                                     }
                                                                                     } // end drawESP
+
+                                                                                    if (isShowTarget && matricesValid) {
+                                                                                        float stW = 0.6f;
+                                                                                        float stH = 1.8f;
+                                                                                        bool stAtk = (g_LastAttackedEntityId == entId && (g_GlobalTime - g_LastAttackTime) < 0.3f);
+                                                                                        
+                                                                                        ImU32 stCol;
+                                                                                        if (g_Toggles[39].value) {
+                                                                                            float hue = fmodf(g_GlobalTime * 0.5f, 1.0f);
+                                                                                            float r, g, b;
+                                                                                            ImGui::ColorConvertHSVtoRGB(hue, 1.0f, 1.0f, r, g, b);
+                                                                                            stCol = IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),200);
+                                                                                        } else if (stAtk) {
+                                                                                            stCol = IM_COL32((int)(g_STColor2[0]*255),(int)(g_STColor2[1]*255),(int)(g_STColor2[2]*255),(int)(g_STColor2[3]*200));
+                                                                                        } else {
+                                                                                            stCol = IM_COL32((int)(g_STColor1[0]*255),(int)(g_STColor1[1]*255),(int)(g_STColor1[2]*255),(int)(g_STColor1[3]*200));
+                                                                                        }
+                                                                                        ImU32 stFill = (stCol & 0x00FFFFFF) | 0x30000000;
+                                                                                        
+                                                                                        int stShape = g_ComboSelections[7]; // 0=Ring 1=Cylinder 2=Box 3=Cone Up 4=Cone Down
+                                                                                        float hw = stW * 0.85f; // Made wider
+                                                                                        float th = stH * 1.25f; // Made taller
+
+                                                                                        auto wts = [&](float wx, float wy, float wz, float& sx, float& sy) -> bool {
+                                                                                            return WorldToScreen(wx, wy, wz, modelView, projection, screenW, screenH, sx, sy);
+                                                                                        };
+
+                                                                                        auto DrawSlice = [&](float y, int sides, float rad, float rot, ImU32 col, float thick) {
+                                                                                            float psx, psy; bool pok = false;
+                                                                                            for (int s = 0; s <= sides; s++) {
+                                                                                                float ang = rot + s * (2.0f * 3.14159265f / sides);
+                                                                                                float bx = (float)interpX + cosf(ang) * rad;
+                                                                                                float bz = (float)interpZ + sinf(ang) * rad;
+                                                                                                float csx, csy;
+                                                                                                bool cok = wts(bx, y, bz, csx, csy);
+                                                                                                if (cok && pok && s > 0) dl->AddLine(ImVec2(psx, psy), ImVec2(csx, csy), col, thick);
+                                                                                                psx = csx; psy = csy; pok = cok;
+                                                                                            }
+                                                                                        };
+
+                                                                                        float bY0 = (float)interpY - 0.1f;
+                                                                                        float bY1 = bY0 + th;
+
+                                                                                        int sides = (stShape == 2) ? 4 : 32;
+                                                                                        float rot = (stShape == 2) ? (3.14159265f / 4.0f) : 0.0f;
+                                                                                        float rad = (stShape == 2) ? (hw * 1.41421356f) : hw;
+
+                                                                                        if (stShape == 1 || stShape == 2) { // Cylinder or Box
+                                                                                            float lastBx = 0, lastBz = 0;
+                                                                                            for (int s = 0; s <= sides; s++) {
+                                                                                                float ang = rot + s * (2.0f * 3.14159265f / sides);
+                                                                                                float bx = (float)interpX + cosf(ang) * rad;
+                                                                                                float bz = (float)interpZ + sinf(ang) * rad;
+                                                                                                if (s > 0) {
+                                                                                                    float sx0, sy0, sx1, sy1, sx2, sy2, sx3, sy3;
+                                                                                                    if (wts(lastBx, bY0, lastBz, sx0, sy0) && wts(bx, bY0, bz, sx1, sy1) &&
+                                                                                                        wts(bx, bY1, bz, sx2, sy2) && wts(lastBx, bY1, lastBz, sx3, sy3)) {
+                                                                                                        dl->AddQuadFilled(ImVec2(sx0,sy0), ImVec2(sx1,sy1), ImVec2(sx2,sy2), ImVec2(sx3,sy3), stFill);
+                                                                                                    }
+                                                                                                }
+                                                                                                lastBx = bx; lastBz = bz;
+                                                                                            }
+                                                                                        } else if (stShape == 3 || stShape == 4) { // Cone Up or Down
+                                                                                            float baseY = (stShape == 3) ? bY0 : bY1;
+                                                                                            float apexY = (stShape == 3) ? bY1 : bY0;
+                                                                                            float cx, cy;
+                                                                                            if (wts((float)interpX, apexY, (float)interpZ, cx, cy)) {
+                                                                                                float lastBx = 0, lastBz = 0;
+                                                                                                for (int s = 0; s <= sides; s++) {
+                                                                                                    float ang = rot + s * (2.0f * 3.14159265f / sides);
+                                                                                                    float bx = (float)interpX + cosf(ang) * rad;
+                                                                                                    float bz = (float)interpZ + sinf(ang) * rad;
+                                                                                                    if (s > 0) {
+                                                                                                        float sx0, sy0, sx1, sy1;
+                                                                                                        if (wts(lastBx, baseY, lastBz, sx0, sy0) && wts(bx, baseY, bz, sx1, sy1)) {
+                                                                                                            dl->AddTriangleFilled(ImVec2(sx0, sy0), ImVec2(sx1, sy1), ImVec2(cx, cy), stFill);
+                                                                                                        }
+                                                                                                    }
+                                                                                                    lastBx = bx; lastBz = bz;
+                                                                                                }
+                                                                                            }
+                                                                                        } else { // Ring (Bottom)
+                                                                                            DrawSlice(bY0, sides, rad, rot, stCol, 3.0f);
+                                                                                        }
+
+                                                                                        // Scan Animation
+                                                                                        if (g_Toggles[37].value) {
+                                                                                            float animTime = g_GlobalTime * 4.0f;
+                                                                                            for (int i = 0; i < 6; i++) {
+                                                                                                float pTime = animTime - i * 0.15f;
+                                                                                                float pt = sinf(pTime) * 0.5f + 0.5f;
+                                                                                                float pY = bY0 - 0.2f + pt * (th + 0.4f);
+                                                                                                int alpha = 255 - i * 45;
+                                                                                                if (alpha < 0) alpha = 0;
+                                                                                                ImU32 trailCol = (stCol & 0x00FFFFFF) | ((ImU32)alpha << 24);
+                                                                                                
+                                                                                                float currentRad = rad;
+                                                                                                if (stShape == 3) { // Cone Up
+                                                                                                    float frac = 1.0f - ((pY - bY0) / th);
+                                                                                                    if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
+                                                                                                    currentRad = rad * frac;
+                                                                                                } else if (stShape == 4) { // Cone Down
+                                                                                                    float frac = (pY - bY0) / th;
+                                                                                                    if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
+                                                                                                    currentRad = rad * frac;
+                                                                                                }
+                                                                                                
+                                                                                                DrawSlice(pY, sides, currentRad, rot, trailCol, 3.0f - i * 0.3f);
+                                                                                            }
+                                                                                        }
+                                                                                    }
 
                                                                                     if (drawTracer) {
                                                                                         ImU32 tracerColor = IM_COL32(255, 255, 255, 255);
@@ -2989,11 +3155,28 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             static const char* auraPriority[] = { "Distance", "Health", "Angle" };
                             StyledCombo("Priority", &g_ComboSelections[1], auraPriority, 3, ea, 1); ImGui::Spacing();
                             AnimatedSlider("Reach", &g_SliderVals[0], 3.0f, 6.0f, "%.1f blocks", dt, ea); ImGui::Spacing();
-                            AnimatedSlider("Min CPS", &g_SliderVals[16], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
-                            AnimatedSlider("Max CPS", &g_SliderVals[17], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
+                            AnimatedRangeSlider("CPS", &g_SliderVals[16], &g_SliderVals[17], 1.0f, 25.0f, "%.0f - %.0f", dt, ea); ImGui::Spacing();
                             AnimatedSlider("FOV", &g_SliderVals[18], 10.0f, 360.0f, "%.0f deg", dt, ea); ImGui::Spacing();
                             AnimatedSlider("Aim Speed", &g_SliderVals[19], 1.0f, 10.0f, "%.1f", dt, ea); ImGui::Spacing();
                             AnimatedToggle("Teams", g_Toggles[26], dt, ea); ImGui::Spacing();
+                            AnimatedToggle("Silent Rotate", g_Toggles[38], dt, ea); ImGui::Spacing();
+
+                            // ── ShowTarget ──────────────────────────────────
+                            ImGui::Spacing();
+                            AnimatedToggle("Show Target", g_Toggles[36], dt, ea); ImGui::Spacing();
+                            if (g_Toggles[36].value) {
+                                static const char* stShapes[] = { "Ring", "Cylinder", "Box", "Cone Up", "Cone Down" };
+                                StyledCombo("Shape", &g_ComboSelections[7], stShapes, 5, ea, 7); ImGui::Spacing();
+                                AnimatedToggle("Scan Anim", g_Toggles[37], dt, ea); ImGui::Spacing();
+                                AnimatedToggle("Rainbow", g_Toggles[39], dt, ea); ImGui::Spacing();
+                                if (!g_Toggles[39].value) {
+                                    ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,ea), "Target Color");
+                                    MiniColorPicker("##stc1", g_STColor1, ea); ImGui::Spacing();
+                                    ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,ea), "Attack Color");
+                                    MiniColorPicker("##stc2", g_STColor2, ea); ImGui::Spacing();
+                                }
+                            }
+
                             ImGui::Unindent(20.0f);
                         }
                         ImGui::Spacing();
@@ -3025,8 +3208,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         if (g_ExpandAnims[6] > 0.01f) {
                             float ea = wAlpha3 * g_ExpandAnims[6];
                             ImGui::Indent(20.0f);
-                            AnimatedSlider("Min CPS", &g_SliderVals[9], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
-                            AnimatedSlider("Max CPS", &g_SliderVals[10], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
+                            AnimatedRangeSlider("CPS", &g_SliderVals[9], &g_SliderVals[10], 1.0f, 25.0f, "%.0f - %.0f", dt, ea); ImGui::Spacing();
                             ImGui::Unindent(20.0f);
                         }
                         ImGui::Spacing();
@@ -3036,8 +3218,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         if (g_ExpandAnims[8] > 0.01f) {
                             float ea = wAlpha4 * g_ExpandAnims[8];
                             ImGui::Indent(20.0f);
-                            AnimatedSlider("Min CPS", &g_SliderVals[11], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
-                            AnimatedSlider("Max CPS", &g_SliderVals[12], 1.0f, 25.0f, "%.0f", dt, ea); ImGui::Spacing();
+                            AnimatedRangeSlider("CPS", &g_SliderVals[11], &g_SliderVals[12], 1.0f, 25.0f, "%.0f - %.0f", dt, ea); ImGui::Spacing();
                             AnimatedSlider("Reach", &g_SliderVals[13], 3.0f, 6.0f, "%.1f blocks", dt, ea); ImGui::Spacing();
                             ImGui::Unindent(20.0f);
                         }
@@ -3169,16 +3350,28 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         }
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 3) {
-                        WIDGET_ANIM(0) AnimatedToggle("AutoTool", g_Toggles[12], dt, wAlpha0);
-                        MODULE_BIND(0, "AutoTool");
+                        WIDGET_ANIM(0) ImGui::TextColored(ImVec4(1,1,1,wAlpha0), "ClickGUI");
+                        ImGui::SetCursorPosX(60 + wOff0);
+                        if (g_BindListening == "__MENUBIND__") {
+                            ImGui::Button("Listening...", ImVec2(100, 24));
+                        } else {
+                            std::string kbText = VkName(g_MenuKey);
+                            if (ImGui::Button(kbText.c_str(), ImVec2(100, 24))) {
+                                g_BindListening = "__MENUBIND__";
+                            }
+                        }
                         ImGui::Spacing();
-                        WIDGET_ANIM(1) static const char* antibot[] = { "Off", "Basic", "Advanced" };
-                        StyledCombo("AntiBot", &g_ComboSelections[2], antibot, 3, wAlpha1, 2); ImGui::Spacing();
+
+                        WIDGET_ANIM(1) AnimatedToggle("AutoTool", g_Toggles[12], dt, wAlpha1);
+                        MODULE_BIND(1, "AutoTool");
                         ImGui::Spacing();
-                        WIDGET_ANIM(3) AnimatedExpandableToggle("BedBreaker", g_Toggles[25], dt, wAlpha3, &g_ExpandStates[11], &g_ExpandAnims[11]);
-                        MODULE_BIND(3, "BedBreaker");
+                        WIDGET_ANIM(2) static const char* antibot[] = { "Off", "Basic", "Advanced" };
+                        StyledCombo("AntiBot", &g_ComboSelections[2], antibot, 3, wAlpha2, 2); ImGui::Spacing();
+                        ImGui::Spacing();
+                        WIDGET_ANIM(4) AnimatedExpandableToggle("BedBreaker", g_Toggles[25], dt, wAlpha4, &g_ExpandStates[11], &g_ExpandAnims[11]);
+                        MODULE_BIND(4, "BedBreaker");
                         if (g_ExpandAnims[11] > 0.01f) {
-                            float ea = wAlpha3 * g_ExpandAnims[11];
+                            float ea = wAlpha4 * g_ExpandAnims[11];
                             ImGui::Indent(20.0f);
                             AnimatedSlider("Radius", &g_SliderVals[25], 10.0f, 40.0f, "%.1f px", dt, ea); ImGui::Spacing();
                             ImGui::Unindent(20.0f);

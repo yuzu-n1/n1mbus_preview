@@ -10,6 +10,13 @@
 
 extern bool g_IsGuiOpen;
 extern bool g_ShowMenu;
+extern int g_LastAttackedEntityId;
+extern float g_LastAttackTime;
+extern float g_GlobalTime;
+extern std::string g_AttackedTargetName;
+
+extern int g_KillAuraTargetId;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  KillAura  –  Automatically attacks entities in range with Anti-Cheat bypasses
@@ -23,6 +30,7 @@ public:
     int   maxCps      = 14;
     float fov         = 360.0f;
     float aimSpeed    = 10.0f; // 1-10
+    bool  silentRotate = false; // true=silent(spoof+restore, 旧挙動を維持) / false=実回転(AC-safe)
     
     bool  autoDisable     = false;
     int   autoDisableTime = 2000; // ms
@@ -241,6 +249,13 @@ public:
             });
         }
 
+        // ── ShowTarget: expose next target ID to renderer ────────────────────
+        if (!candidates.empty()) {
+            g_KillAuraTargetId = candidates[0].id;
+        } else {
+            g_KillAuraTargetId = -1;
+        }
+
         // ── Execution based on Mode ───────────────────────────────────────────
         if (mode == 2) {
             // Multi mode: attack up to 4 candidates in priority order
@@ -276,8 +291,10 @@ public:
 
                     multiHitCount++;
                     m_lastTargetId = target.id;
+                    g_LastAttackedEntityId = target.id;
+                    g_LastAttackTime = g_GlobalTime;
+                    _captureAttackedName(env, entityClass, target.obj);
                 }
-
                 m_lastClickTime = now;
                 int cMin = minCps, cMax = maxCps;
                 if (cMin > cMax) std::swap(cMin, cMax);
@@ -311,33 +328,67 @@ public:
             float serverYaw = pYaw + stepYaw;
             float serverPitch = pPitch + stepPitch;
 
-            m_serverYaw = serverYaw;
-            m_serverPitch = serverPitch;
+            // Smoothed Silent Aim: slowly approach target angle to bypass AC
+            float dYawS = yawTo - m_serverYaw;
+            if (dYawS > 180.0f) dYawS -= 360.0f;
+            if (dYawS < -180.0f) dYawS += 360.0f;
+            float dPitchS = pitchTo - m_serverPitch;
+            
+            float stepYawS = dYawS * factor;
+            float stepPitchS = dPitchS * factor;
+            stepYawS -= std::fmod(stepYawS, gcd);
+            stepPitchS -= std::fmod(stepPitchS, gcd);
 
-            if (readyToAttack) {
-                float origPrevYaw = prevYawF ? env->GetFloatField(playerObj, prevYawF) : 0.0f;
-                float origPrevPitch = prevPitchF ? env->GetFloatField(playerObj, prevPitchF) : 0.0f;
+            float exactYaw = m_serverYaw + stepYawS;
+            float exactPitch = m_serverPitch + stepPitchS;
+            if (exactPitch > 90.0f) exactPitch = 90.0f;
+            if (exactPitch < -90.0f) exactPitch = -90.0f;
 
+            if (silentRotate) {
+                // Continuous exact-aim stream: every vanilla tick packet is
+                // rewritten to face the target (zero extra packets, so the
+                // Timer balance is untouched). Camera fields never move.
+                _notifyAgentSilentRotation(env, exactYaw, exactPitch);
+                m_serverYaw = exactYaw;
+                m_serverPitch = exactPitch;
+            } else {
+                m_serverYaw = serverYaw;
+                m_serverPitch = serverPitch;
+                // R E A L : persist smoothed aim on actual camera (AC-safe).
                 if (yawF) env->SetFloatField(playerObj, yawF, serverYaw);
                 if (pitchF) env->SetFloatField(playerObj, pitchF, serverPitch);
+                if (prevYawF) env->SetFloatField(playerObj, prevYawF, serverYaw);
+                if (prevPitchF) env->SetFloatField(playerObj, prevPitchF, serverPitch);
+                if (yawHeadF) env->SetFloatField(playerObj, yawHeadF, serverYaw);
+                if (renderYawOffsetF) env->SetFloatField(playerObj, renderYawOffsetF, serverYaw);
+            }
 
-                _notifyAgentSilentRotation(env, serverYaw, serverPitch);
+            // Wait for smoothed aim to converge on the target
+            float remainYaw = yDiff - stepYaw;
+            float remainPitch = pDiff - stepPitch;
+            float remainYawS = dYawS - stepYawS;
+            float remainPitchS = dPitchS - stepPitchS;
+            bool aimReady = silentRotate ?
+                ((std::fabs(remainYawS) <= 3.0f) && (std::fabs(remainPitchS) <= 3.0f)) :
+                ((std::fabs(remainYaw) <= 3.0f) && (std::fabs(remainPitch) <= 3.0f));
 
+            if (readyToAttack && aimReady) {
+                // (silent arming runs every frame above; no extra packets here)
+                // 1.8 vanilla order: swing (C0A) BEFORE attack (C02).
+                // Grim PacketOrderB 1.8 requires ANIMATION pre-attack.
                 if (swingMeth) {
                     env->CallVoidMethod(playerObj, swingMeth);
                     _ex(env);
                 }
-                
+
                 env->CallVoidMethod(controllerObj, attackMeth, playerObj, bestTarget.obj);
                 _ex(env);
-
-                if (yawF) env->SetFloatField(playerObj, yawF, pYaw);
-                if (pitchF) env->SetFloatField(playerObj, pitchF, pPitch);
-                if (prevYawF) env->SetFloatField(playerObj, prevYawF, origPrevYaw);
-                if (prevPitchF) env->SetFloatField(playerObj, prevPitchF, origPrevPitch);
                 
                 m_lastTargetId = bestTarget.id;
-                
+                g_LastAttackedEntityId = bestTarget.id;
+                g_LastAttackTime = g_GlobalTime;
+                _captureAttackedName(env, entityClass, bestTarget.obj);
+
                 if (mode == 1) {
                     m_switchIndex = (m_switchIndex + 1) % candidates.size();
                 }
@@ -349,13 +400,21 @@ public:
                 else m_nextCps = cMin + (rand() % (cMax - cMin + 1));
             }
 
-            if (yawHeadF) env->SetFloatField(playerObj, yawHeadF, serverYaw);
-            if (renderYawOffsetF) env->SetFloatField(playerObj, renderYawOffsetF, serverYaw);
+            // Silent touches no camera fields: nothing to restore.
+            if (!silentRotate) {
+                if (yawHeadF) env->SetFloatField(playerObj, yawHeadF, serverYaw);
+                if (renderYawOffsetF) env->SetFloatField(playerObj, renderYawOffsetF, serverYaw);
+            }
         }
 
         // Cleanup local refs of candidates
         for (auto& c : candidates) {
             env->DeleteLocalRef(c.obj);
+        }
+
+        if (candidates.empty()) {
+            m_serverYaw = pYaw;
+            m_serverPitch = pPitch;
         }
 
         if (controllerObj) env->DeleteLocalRef(controllerObj);
@@ -391,6 +450,20 @@ private:
             }
             if (env->ExceptionCheck()) env->ExceptionClear();
             env->DeleteLocalRef(agentClass);
+        }
+    }
+
+    static void _captureAttackedName(JNIEnv* env, jclass entityClass, jobject targetObj) {
+        g_AttackedTargetName.clear();
+        jmethodID getNameM = MC::methodID(env, entityClass, "Entity.getName");
+        if (!getNameM) return;
+        jstring jn = (jstring)env->CallObjectMethod(targetObj, getNameM);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+        if (jn) {
+            const char* chars = env->GetStringUTFChars(jn, nullptr);
+            if (chars) g_AttackedTargetName = chars;
+            if (chars) env->ReleaseStringUTFChars(jn, chars);
+            env->DeleteLocalRef(jn);
         }
     }
 

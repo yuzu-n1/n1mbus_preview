@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "Module.hpp"
 #include "../minecraft_mappings.hpp"
+#include "../mapping_resolver.hpp"
 #include "../jni_manager.hpp"
 #include <windows.h>
 #include <chrono>
@@ -29,6 +30,8 @@ public:
         jclass mcClass = env->GetObjectClass(mcObj);
         if (!mcClass) return;
         
+        _resolveLcField(env, mcClass);
+        
         // Prevent clicking while Minecraft menu (inventory, chat, etc.) is open
         jfieldID currentScreenF = env->GetFieldID(mcClass, Mappings::Minecraft_currentScreen_Name, Mappings::Minecraft_currentScreen_Sig);
         if (env->ExceptionCheck()) env->ExceptionClear();
@@ -36,6 +39,7 @@ public:
             jobject currentScreenObj = env->GetObjectField(mcObj, currentScreenF);
             if (currentScreenObj) {
                 env->DeleteLocalRef(currentScreenObj);
+                m_pend.firedAt = 0;
                 env->DeleteLocalRef(mcClass);
                 return; // Minecraft menu is open
             }
@@ -121,46 +125,112 @@ public:
         env->DeleteLocalRef(mcClass);
         if (env->ExceptionCheck()) env->ExceptionClear();
 
-        if (!shouldClick) return;
+        if (!shouldClick) { m_pend.firedAt = 0; return; }
 
         // CPS timing
         long long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         if (m_lastClickTime == 0) m_lastClickTime = now;
         if (m_nextCps <= 0) m_nextCps = 10;
 
+        jmethodID meth = _clickMethod(env, mcObj);
+
+        // Settle a pending native click (JNI fallback if the game dropped it)
+        _settle(env, mcObj, meth);
+
         if ((now - m_lastClickTime) < (1000 / m_nextCps)) return;
 
-        // Click through the game's own handler. LWJGL2 ignores WM_LBUTTONDOWN and
-        // SendInput gets throttled by Minecraft's leftClickCounter, so the
-        // vanilla clickMouse() is called directly (SendInput fallback).
-        jmethodID clickMeth = nullptr;
-        jclass mcCls2 = env->GetObjectClass(mcObj);
-        if (mcCls2) {
-            clickMeth = env->GetMethodID(mcCls2, Mappings::Minecraft_clickMouse_Name, Mappings::Minecraft_clickMouse_Sig);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            env->DeleteLocalRef(mcCls2);
-        }
-        if (clickMeth) {
-            env->CallVoidMethod(mcObj, clickMeth);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-        } else {
-            INPUT in[2] = {};
-            in[0].type = INPUT_MOUSE;
-            in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-            in[1].type = INPUT_MOUSE;
-            in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-            SendInput(2, in, sizeof(INPUT));
-        }
+        if (m_pend.canFire()) {
+            _fire(env, mcObj, meth);
+            m_lastClickTime = now;
 
-        m_lastClickTime = now;
-
-        int cMin = minCps, cMax = maxCps;
-        if (cMin > cMax) std::swap(cMin, cMax);
-        if (cMin == cMax) { m_nextCps = cMin; return; }
-        m_nextCps = cMin + (rand() % (cMax - cMin + 1));
+            int cMin = minCps, cMax = maxCps;
+            if (cMin > cMax) std::swap(cMin, cMax);
+            if (cMin == cMax) { m_nextCps = cMin; return; }
+            m_nextCps = cMin + (rand() % (cMax - cMin + 1));
+        }
     }
 
 private:
     long long m_lastClickTime = 0;
     int m_nextCps = 10;
+
+    struct Pend {
+        long long firedAt = 0;
+        int  lcBase = -1;
+        bool sawChange = false;
+        bool jniFired = false;
+        bool canFire() const { return firedAt == 0; }
+    };
+    Pend m_pend;
+
+    static jfieldID s_lcField;
+    static bool     s_lcTried;
+
+    static jmethodID _clickMethod(JNIEnv* env, jobject mcObj) {
+        jclass mcCls = env->GetObjectClass(mcObj);
+        if (!mcCls) return nullptr;
+        jmethodID m = env->GetMethodID(mcCls, Mappings::Minecraft_clickMouse_Name, Mappings::Minecraft_clickMouse_Sig);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(mcCls);
+        return m;
+    }
+
+    static void _resolveLcField(JNIEnv* env, jclass mcClass) {
+        if (s_lcTried) return;
+        s_lcTried = true;
+        std::string nm = MappingResolver::FindFieldFromNames(env, mcClass, {"leftClickCounter", "field_71471_av"});
+        if (!nm.empty()) {
+            s_lcField = env->GetFieldID(mcClass, nm.c_str(), "I");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+
+    static int _readLc(JNIEnv* env, jobject mcObj) {
+        if (!s_lcField) return -1;
+        int v = env->GetIntField(mcObj, s_lcField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return -1; }
+        return v;
+    }
+
+    static long long _nowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    void _fire(JNIEnv* env, jobject mcObj, jmethodID meth) {
+        m_pend.firedAt = _nowMs();
+        m_pend.sawChange = false;
+        m_pend.jniFired = false;
+        m_pend.lcBase = _readLc(env, mcObj);
+        if (m_pend.lcBase == -1) {
+            // Can't verify native registration → rely on JNI directly.
+            m_pend.firedAt = 0;
+            if (meth) env->CallVoidMethod(mcObj, meth);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            return;
+        }
+        // Real native click (visible to Lunar-style CPS counters)
+        INPUT in[2] = {};
+        in[0].type = INPUT_MOUSE;
+        in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        in[1].type = INPUT_MOUSE;
+        in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        SendInput(2, in, sizeof(INPUT));
+    }
+
+    void _settle(JNIEnv* env, jobject mcObj, jmethodID meth) {
+        if (m_pend.firedAt == 0) return;
+        int lc = _readLc(env, mcObj);
+        if (!m_pend.sawChange && lc != -1 && lc != m_pend.lcBase) m_pend.sawChange = true;
+        if (m_pend.sawChange) { m_pend.firedAt = 0; return; }
+        if ((_nowMs() - m_pend.firedAt) >= 80 && !m_pend.jniFired) {
+            m_pend.jniFired = true;
+            if (meth) env->CallVoidMethod(mcObj, meth);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            m_pend.firedAt = 0;
+        }
+    }
 };
+
+jfieldID TriggerBot::s_lcField = nullptr;
+bool     TriggerBot::s_lcTried = false;

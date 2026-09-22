@@ -4,6 +4,8 @@
 #include <memory>
 #include <algorithm>
 
+extern bool g_HudEditorMode;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  ModuleManager  – owns all Module instances, dispatches per-frame ticks
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,6 +27,7 @@ public:
 
     // Dispatch onUpdate to all enabled modules
     void tickAll(JNIEnv* env, jobject mcObj, jobject playerObj, jclass playerClass) {
+        if (g_HudEditorMode) return; // Do not run modules while arranging HUD
         for (auto& m : m_modules)
             if (m->isEnabled())
                 m->onUpdate(env, mcObj, playerObj, playerClass);
