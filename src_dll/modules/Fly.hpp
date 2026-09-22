@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "Module.hpp"
 #include "../minecraft_mappings.hpp"
 #include "../jni_manager.hpp"
@@ -16,6 +16,9 @@
 //    3 Smooth   – vanilla caps + smooth acceleration achieved by scaling
 //                 motionX/Z toward the desired vector each tick
 // ─────────────────────────────────────────────────────────────────────────────
+extern bool g_IsGuiOpen;
+extern HWND g_hWnd;
+
 class Fly : public Module {
 public:
     int   mode  = 0;      // 0=Vanilla 1=Glide 2=Freeze 3=Smooth
@@ -75,10 +78,13 @@ public:
             jfieldID mZf = env->GetFieldID(entityClass, Mappings::Entity_motionZ_Name, Mappings::Entity_motionZ_Sig);
             _clearEx(env);
 
-            bool space = (GetAsyncKeyState(VK_SPACE)  & 0x8000) != 0;
-            bool shift = (GetAsyncKeyState(VK_LSHIFT) & 0x8000) != 0;
-            bool wasd  = (GetAsyncKeyState('W') & 0x8000) || (GetAsyncKeyState('A') & 0x8000) ||
-                         (GetAsyncKeyState('S') & 0x8000) || (GetAsyncKeyState('D') & 0x8000);
+            bool space = false, shift = false, wasd = false;
+            if (!g_IsGuiOpen && (!g_hWnd || GetForegroundWindow() == g_hWnd)) {
+                space = (GetAsyncKeyState(VK_SPACE)  & 0x8000) != 0;
+                shift = (GetAsyncKeyState(VK_LSHIFT) & 0x8000) != 0;
+                wasd  = (GetAsyncKeyState('W') & 0x8000) || (GetAsyncKeyState('A') & 0x8000) ||
+                             (GetAsyncKeyState('S') & 0x8000) || (GetAsyncKeyState('D') & 0x8000);
+            }
 
             if (mode == 1 && mYf) {
                 // Glide: gentle drift downward when coasting

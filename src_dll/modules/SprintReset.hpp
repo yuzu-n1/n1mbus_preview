@@ -1,16 +1,22 @@
-﻿#pragma once
+#pragma once
 #include "Module.hpp"
 #include "../minecraft_mappings.hpp"
 #include "../jni_manager.hpp"
 #include <windows.h>
 #include <chrono>
 
+extern bool g_IsGuiOpen;
+extern HWND g_hWnd;
+
 class SprintReset : public Module {
 public:
     SprintReset() : Module("SprintReset") {}
 
     void onUpdate(JNIEnv* env, jobject mcObj, jobject playerObj, jclass playerClass) override {
-        if (!env || !mcObj || !playerObj) return;
+        if (!env || !playerObj || !playerClass) return;
+        
+        if (g_IsGuiOpen) return;
+        if (g_hWnd && GetForegroundWindow() != g_hWnd) return;
 
         static bool isAction = false;
         static long long startTime = 0;

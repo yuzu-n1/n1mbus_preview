@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "Module.hpp"
 #include "../minecraft_mappings.hpp"
 #include <windows.h>
@@ -7,12 +7,18 @@
 //  AutoSprint  –  Calls Entity.setSprinting(true) whenever W is held.
 //  Clears the sprint flag when the module is disabled to avoid sticking.
 // ─────────────────────────────────────────────────────────────────────────────
+extern bool g_IsGuiOpen;
+extern HWND g_hWnd;
+
 class AutoSprint : public Module {
 public:
     AutoSprint() : Module("AutoSprint") {}
 
     void onUpdate(JNIEnv* env, jobject /*mcObj*/, jobject playerObj, jclass playerClass) override {
         if (!env || !playerObj || !playerClass) return;
+        
+        if (g_IsGuiOpen) return;
+        if (g_hWnd && GetForegroundWindow() != g_hWnd) return;
 
         if (GetAsyncKeyState('W') & 0x8000) {
             jmethodID setSprinting = env->GetMethodID(playerClass,

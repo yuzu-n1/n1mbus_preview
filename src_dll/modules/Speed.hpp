@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "Module.hpp"
 #include "../minecraft_mappings.hpp"
 #include "../jni_manager.hpp"
@@ -16,6 +16,9 @@
 //                 the classic "speed" hack used by legacy clients.
 //    2  BHop    – Auto-jumps while moving and applies strafe speed in the air.
 // ─────────────────────────────────────────────────────────────────────────────
+extern bool g_IsGuiOpen;
+extern HWND g_hWnd;
+
 class Speed : public Module {
 public:
     int   mode       = 0;    // 0=Ground  1=Boost  2=BHop
@@ -25,6 +28,9 @@ public:
 
     void onUpdate(JNIEnv* env, jobject /*mcObj*/, jobject playerObj, jclass playerClass) override {
         if (!env || !playerObj || !playerClass) return;
+        
+        if (g_IsGuiOpen) return;
+        if (g_hWnd && GetForegroundWindow() != g_hWnd) return;
 
         bool w = (GetAsyncKeyState('W') & 0x8000) != 0;
         bool a = (GetAsyncKeyState('A') & 0x8000) != 0;

@@ -1,8 +1,11 @@
-﻿#pragma once
+#pragma once
 #include "Module.hpp"
 #include "../minecraft_mappings.hpp"
 #include "../jni_manager.hpp"
 #include <cmath>
+
+extern bool g_IsGuiOpen;
+extern HWND g_hWnd;
 
 class AimAssist : public Module {
 public:
@@ -16,6 +19,10 @@ public:
 
     void onUpdate(JNIEnv* env, jobject mcObj, jobject playerObj, jclass playerClass) override {
         if (!env || !mcObj || !playerObj || !playerClass) return;
+
+        if (g_IsGuiOpen) return;
+        if (g_hWnd && GetForegroundWindow() != g_hWnd) return;
+
         // Only aim when left button is held (attacking)
         if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return;
 

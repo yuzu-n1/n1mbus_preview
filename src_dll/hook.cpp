@@ -13,6 +13,7 @@
 #include <urlmon.h>
 #include "MinHook.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "style.hpp"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_opengl3.h"
@@ -45,6 +46,8 @@ WNDPROC o_WndProc = nullptr;
 HWND g_hWnd = nullptr;
 bool g_Initialized = false;
 static bool g_ShowMenu = false;
+bool g_ResetPanelScrolls = false;
+float g_PanelSmoothScroll[15] = {}; // Per-panel smooth scroll targets, indexed by ExpandStates index
 HMODULE g_hModule = nullptr;
 float g_MenuAlpha = 0.0f;
 float g_GlobalTime = 0.0f;
@@ -106,7 +109,7 @@ float g_ComboOpenAnim[8] = {};
 // [16]=KillAura Min CPS [17]=KillAura Max CPS [18]=KillAura FOV [19]=KillAura Aim
 // [20]=ArrayList X [21]=ArrayList Y [22]=ArrayList Scale [23]=TargetHUD Range [24]=ArrayList Anim Speed
 // [25]=BedBreaker Radius
-float g_SliderVals[40] = {3.0f, 1.0f, 1.5f, 10.0f, 1.0f, 40.0f, 40.0f, 5.0f, 90.0f, 10.0f, 14.0f, 8.0f, 12.0f, 3.0f, 0.0f, 0.0f, 10.0f, 14.0f, 360.0f, 10.0f, -1.0f, 10.0f, 0.0f, 64.0f, 1.0f, 25.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+float g_SliderVals[40] = {3.0f, 1.0f, 1.5f, 10.0f, 1.0f, 40.0f, 40.0f, 5.0f, 90.0f, 10.0f, 14.0f, 8.0f, 12.0f, 3.0f, 0.0f, 0.0f, 10.0f, 14.0f, 360.0f, 10.0f, -1.0f, 10.0f, 0.0f, 64.0f, 1.0f, 25.0f, 0.0f, 0.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 int g_ComboSelections[8] = {};
 float g_Colors[4][4] = {
     {0.26f, 0.56f, 1.0f, 1.0f},
@@ -341,6 +344,8 @@ static void CloseMenu() {
     SaveConfig();
     g_ShowMenu = false;
     g_HudEditorMode = false;
+    for (int i = 0; i < 15; i++) { g_ExpandStates[i] = false; g_ExpandAnims[i] = 0.0f; }
+    memset(g_PanelSmoothScroll, 0, sizeof(g_PanelSmoothScroll));
     if (g_hWnd) {
         RECT rect; GetClientRect(g_hWnd, &rect);
         POINT pt = { (rect.right - rect.left) / 2, (rect.bottom - rect.top) / 2 };
@@ -348,6 +353,44 @@ static void CloseMenu() {
         if (o_SetCursorPos) o_SetCursorPos(pt.x, pt.y);
     }
 }
+
+// ---- Smooth Scrolling Helper ----
+// NOTE: Must be called from the PARENT window context. Enters the child window and applies smooth scroll.
+// panel_idx version: uses g_PanelSmoothScroll[panel_idx] global - can be reset from anywhere (including when panel is closed)
+static bool BeginSmoothScrollChild(int panel_idx, const ImVec2& size_arg = ImVec2(0, 0), bool border = false, ImGuiWindowFlags extra_flags = 0) {
+    float dt = ImGui::GetIO().DeltaTime;
+    
+    // Read mouse wheel BEFORE entering child (still in parent context)
+    float wheel = 0.0f;
+    ImVec2 childPos = ImGui::GetCursorScreenPos();
+    ImVec2 childSize = size_arg;
+    if (childSize.x <= 0.0f) childSize.x = ImGui::GetContentRegionAvail().x;
+    if (childSize.y <= 0.0f) childSize.y = ImGui::GetContentRegionAvail().y;
+    ImVec2 mousePos = ImGui::GetIO().MousePos;
+    bool mouseOverChild = (mousePos.x >= childPos.x && mousePos.x <= childPos.x + childSize.x &&
+                           mousePos.y >= childPos.y && mousePos.y <= childPos.y + childSize.y);
+    if (mouseOverChild) {
+        wheel = ImGui::GetIO().MouseWheel;
+    }
+    
+    bool ret = ImGui::BeginChild(ImGui::GetID((void*)(intptr_t)panel_idx), size_arg, border, extra_flags | ImGuiWindowFlags_NoScrollWithMouse);
+    
+    float current_scroll_y = ImGui::GetScrollY();
+    float& target = g_PanelSmoothScroll[panel_idx];
+    
+    if (wheel != 0.0f) {
+        target -= wheel * 50.0f;
+    }
+    float maxScroll = ImGui::GetScrollMaxY();
+    if (target < 0.0f) target = 0.0f;
+    if (maxScroll > 0.0f && target > maxScroll) target = maxScroll;
+    
+    float new_scroll_y = current_scroll_y + (target - current_scroll_y) * ImClamp(dt * 15.0f, 0.0f, 1.0f);
+    ImGui::SetScrollY(new_scroll_y);
+    
+    return ret;
+}
+
 
 // ---- Custom Widgets with Global Alpha Multiplier ----
 
@@ -1149,6 +1192,9 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                 g_TabSlideAnim = 0;
                 // Reset widget stagger animations for entrance
                 for (int w = 0; w < 20; w++) g_WidgetStagger[w] = 0.0f;
+                // Reset detail panels and scrolls
+                for (int i = 0; i < 15; i++) { g_ExpandStates[i] = false; g_ExpandAnims[i] = 0.0f; }
+                memset(g_PanelSmoothScroll, 0, sizeof(g_PanelSmoothScroll));
             }
         } else {
             if (g_TabSlideAnim < 1) { g_TabSlideAnim += dt * 8.0f; if (g_TabSlideAnim > 1) g_TabSlideAnim = 1; }
@@ -1708,6 +1754,9 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                         float bestTargetDist2D = 99999.0f;
                                                                         jobject bestTargetObj = nullptr;
                                                                         float bestTargetDistance3D = 0.0f;
+                                                                        int bestTargetId = -1;
+                                                                        jobject hudTargetObj = nullptr;
+                                                                        float hudTargetDistance3D = 0.0f;
 
                                                                         for (int i = 0; i < size; i++) {
                                                                             jobject entObj = env->CallObjectMethod(listObj, getMeth, i);
@@ -1734,8 +1783,20 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                                         entId = env->CallIntMethod(entObj, getEntityId);
                                                                                         if (env->ExceptionCheck()) env->ExceptionClear();
                                                                                     }
+                                                                                    
+                                                                                    if (entId != -1 && entId == g_LastAttackedEntityId) {
+                                                                                        hudTargetObj = env->NewLocalRef(entObj);
+                                                                                        if (pXField && pYField && pZField) {
+                                                                                            double tx = env->GetDoubleField(entObj, pXField);
+                                                                                            double ty = env->GetDoubleField(entObj, pYField);
+                                                                                            double tz = env->GetDoubleField(entObj, pZField);
+                                                                                            hudTargetDistance3D = sqrt((float)((tx - viewerX)*(tx - viewerX) + (ty - viewerY)*(ty - viewerY) + (tz - viewerZ)*(tz - viewerZ)));
+                                                                                        }
+                                                                                    }
+                                                                                    
+                                                                                    bool isLiving = env->IsInstanceOf(entObj, entityLivingBaseClass);
                                                                                     bool isShowTarget = (g_Toggles[36].value && entId != -1 && entId == g_KillAuraTargetId);
-                                                                                    if (drawESP || drawTracer || isShowTarget || (needsTargetTracking && (isPlayer || isHostile || isPassive))) {
+                                                                                    if (drawESP || drawTracer || isShowTarget || (needsTargetTracking && isLiving)) {
                                                                                         double x = env->GetDoubleField(entObj, pXField);
                                                                                         double y = env->GetDoubleField(entObj, pYField);
                                                                                         double z = env->GetDoubleField(entObj, pZField);
@@ -1755,7 +1816,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                                         bool okBottom = WorldToScreen((float)interpX, (float)interpY, (float)interpZ, modelView, projection, screenW, screenH, sBottomX, sBottomY);
                                                                                         bool okTop = WorldToScreen((float)interpX, (float)(interpY + h + 0.1), (float)interpZ, modelView, projection, screenW, screenH, sTopX, sTopY);
                                                                                         
-                                                                                        if (needsTargetTracking && dist3D <= g_SliderVals[23] && okBottom && okTop) {
+                                                                                        if (needsTargetTracking && okBottom && okTop) {
                                                                                             float cx = screenW / 2.0f;
                                                                                             float cy = screenH / 2.0f;
                                                                                             float boxH = sBottomY - sTopY;
@@ -1775,6 +1836,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                                                         bestTargetDistance3D = dist3D;
                                                                                                         if (bestTargetObj) env->DeleteLocalRef(bestTargetObj);
                                                                                                         bestTargetObj = env->NewLocalRef(entObj);
+                                                                                                        bestTargetId = entId;
                                                                                                     }
                                                                                                 }
                                                                                             }
@@ -2077,34 +2139,45 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                             } // end entObj
                                                                         } // end for loop
                                                                         
-                                                                        // -- After loop: resolve bestTarget for TargetHUD --
+                                                                        // -- After loop: resolve TargetHUD entity --
+                                                                        
+                                                                        static bool prevLButton = false;
+                                                                        bool curLButton = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                                                                        bool justClicked = curLButton && !prevLButton;
+                                                                        prevLButton = curLButton;
+                                                                        
+                                                                        if (justClicked && bestTargetId != -1) {
+                                                                            g_LastAttackedEntityId = bestTargetId;
+                                                                            g_LastAttackTime = g_GlobalTime;
+                                                                        }
+                                                                        
                                                                         g_HasTarget = false;
-                                                                        if (bestTargetObj) {
-                                                                            jclass entClass = env->GetObjectClass(bestTargetObj);
+                                                                        if (hudTargetObj) {
+                                                                            jclass entClass = env->GetObjectClass(hudTargetObj);
                                                                             jmethodID getName = MC::methodID(env, entClass, "Entity.getName");
                                                                             if (getName) {
-                                                                                jstring nameStr = (jstring)env->CallObjectMethod(bestTargetObj, getName);
+                                                                                jstring nameStr = (jstring)env->CallObjectMethod(hudTargetObj, getName);
                                                                                 if (nameStr) {
                                                                                     const char* nameChars = env->GetStringUTFChars(nameStr, nullptr);
                                                                                     if (nameChars) {
                                                                                         g_TargetName = nameChars;
                                                                                         env->ReleaseStringUTFChars(nameStr, nameChars);
                                                                                         if (!g_TargetName.empty()) {
-                                                                                            g_TargetSkinTexID = fetchSkinId(bestTargetObj);
+                                                                                            g_TargetSkinTexID = fetchSkinId(hudTargetObj);
                                                                                         }
                                                                                     }
                                                                                     env->DeleteLocalRef(nameStr);
                                                                                 }
                                                                             }
                                                                             if (getHealth && getMaxHealth) {
-                                                                                g_TargetHealth    = env->CallFloatMethod(bestTargetObj, getHealth);
-                                                                                g_TargetMaxHealth = env->CallFloatMethod(bestTargetObj, getMaxHealth);
+                                                                                g_TargetHealth    = env->CallFloatMethod(hudTargetObj, getHealth);
+                                                                                g_TargetMaxHealth = env->CallFloatMethod(hudTargetObj, getMaxHealth);
                                                                                 if (env->ExceptionCheck()) env->ExceptionClear();
                                                                             }
-                                                                            g_TargetDistance = bestTargetDistance3D;
+                                                                            g_TargetDistance = hudTargetDistance3D;
                                                                             // Armor
                                                                             if (getTotalArmorValue) {
-                                                                                g_TargetArmor = env->CallIntMethod(bestTargetObj, getTotalArmorValue);
+                                                                                g_TargetArmor = env->CallIntMethod(hudTargetObj, getTotalArmorValue);
                                                                                 if (env->ExceptionCheck()) { env->ExceptionClear(); g_TargetArmor = 0; }
                                                                             } else {
                                                                                 g_TargetArmor = 0;
@@ -2112,7 +2185,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                             // Held item
                                                                             g_TargetHeldItem = "";
                                                                             if (getHeldItem) {
-                                                                                jobject heldItemObj = env->CallObjectMethod(bestTargetObj, getHeldItem);
+                                                                                jobject heldItemObj = env->CallObjectMethod(hudTargetObj, getHeldItem);
                                                                                 if (env->ExceptionCheck()) env->ExceptionClear();
                                                                                 if (heldItemObj && getDisplayName) {
                                                                                     jstring dispStr = (jstring)env->CallObjectMethod(heldItemObj, getDisplayName);
@@ -2131,7 +2204,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                              // Ping & Potions
                                                                              g_TargetPing = -1;
                                                                              g_TargetPotionCount = 0;
-                                                                             g_TargetIsPlayer = env->IsInstanceOf(bestTargetObj, playerCls) ? true : false;
+                                                                             g_TargetIsPlayer = env->IsInstanceOf(hudTargetObj, playerCls) ? true : false;
                                                                              
                                                                              if (g_TargetIsPlayer) {
                                                                                 jmethodID getNetHandler = MC::methodID(env, mcClass, "Minecraft.getNetHandler");
@@ -2161,7 +2234,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                             
                                                                             jmethodID getPotions = MC::methodID(env, entClass, "EntityLivingBase.getActivePotionEffects");
                                                                             if (getPotions) {
-                                                                                jobject potCol = env->CallObjectMethod(bestTargetObj, getPotions);
+                                                                                jobject potCol = env->CallObjectMethod(hudTargetObj, getPotions);
                                                                                 if (env->ExceptionCheck()) env->ExceptionClear();
                                                                                 if (potCol) {
                                                                                     jclass colClass = env->FindClass("java/util/Collection");
@@ -2178,9 +2251,11 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                                                             }
 
                                                                             env->DeleteLocalRef(entClass);
-                                                                            env->DeleteLocalRef(bestTargetObj);
+                                                                            env->DeleteLocalRef(hudTargetObj);
                                                                             g_HasTarget = true;
                                                                         }
+                                                                        
+                                                                        if (bestTargetObj) env->DeleteLocalRef(bestTargetObj);
                                                                         if (itemStackCls) env->DeleteLocalRef(itemStackCls);
                                                                     } // end sizeMeth && getMeth check
                                                                     if (playerCls) env->DeleteLocalRef(playerCls);
@@ -2445,19 +2520,19 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
         }
         prevTargetHudToggle = curTargetHudToggle;
         
-        bool onCrosshair = (g_HasTarget && g_TargetDistance < g_SliderVals[23]);
-        bool leftClickAttack = onCrosshair && ImGui::GetIO().MouseDown[0];
+        bool leftClickAttack = (g_GlobalTime - g_LastAttackTime < 0.1f);
+        bool auraAttack = (g_KillAuraTargetId != -1) && (g_GlobalTime - g_LastAttackTime < 0.1f);
         
         // Update attack timer: reset only on attack, count up otherwise
-        if (leftClickAttack && !g_HudEditorMode) {
+        if ((leftClickAttack || auraAttack) && !g_HudEditorMode) {
             g_TargetAttackTimer = 0.0f;
         } else if (!g_HudEditorMode) {
             g_TargetAttackTimer += dt;
         }
         
-        // HUD only shows when attacking or within 4s of last attack
-        bool attackActive = (g_TargetAttackTimer < 4.0f);
-        bool shouldShowHUD = (g_HudEditorMode || (g_HasTarget && (leftClickAttack || attackActive)));
+        // HUD only shows when attacking or within Hold Time seconds of last attack
+        bool attackActive = (g_TargetAttackTimer < g_SliderVals[28]);
+        bool shouldShowHUD = (g_HudEditorMode || (g_HasTarget && attackActive));
         
         // Alpha update
         if (curTargetHudToggle && shouldShowHUD && !hideHUD) {
@@ -2465,7 +2540,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             if (g_TargetInfoAlpha > 1.0f) g_TargetInfoAlpha = 1.0f;
         } else {
             g_TargetInfoAlpha -= dt * (thSpeed * 2.0f);
-            if (g_TargetInfoAlpha < 0.0f) { g_TargetInfoAlpha = 0.0f; g_TargetAttackTimer = 0.0f; }
+            if (g_TargetInfoAlpha < 0.0f) { g_TargetInfoAlpha = 0.0f; }
         }
 
         if (curTargetHudToggle && g_TargetInfoAlpha > 0.01f && !hideHUD) {
@@ -3009,6 +3084,14 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         gradL, gradR, gradR, gradL
                     );
 
+                    // Header background
+                    dl->AddRectFilled(
+                        ImVec2(wp.x + sidebarW, wp.y),
+                        ImVec2(wp.x + ws.x, wp.y + 85.0f),
+                        IM_COL32(8, 14, 18, (int)(255 * MAlpha)),
+                        10.0f, ImDrawFlags_RoundCornersTopRight
+                    );
+
                     // Banner image at top of sidebar
                     if (g_BannerTex) {
                         float bannerW = sidebarW - 40.0f;
@@ -3028,7 +3111,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
 
                     const char* tabNames[] = { "Combat", "Movement", "Render", "Utility", "Network", "Plugins" };
                     const char* tabIcons[] = { ICON_FA_SHIELD, ICON_FA_PERSON_RUNNING, ICON_FA_EYE, ICON_FA_GEAR, ICON_FA_WIFI, ICON_FA_PUZZLE_PIECE };
-                    float tabStartY = 105.0f, tabH = 45.0f;
+                    float tabStartY = 130.0f, tabH = 45.0f;
 
                     for (int i = 0; i < 6; i++) {
                         float itemY = tabStartY + i * tabH;
@@ -3121,7 +3204,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
 
                     float contentAlpha = MAlpha * modAlpha;
 
-                    ImGui::SetCursorPos(ImVec2(45 + headerOffsetX, 45));
+                    ImGui::SetCursorPos(ImVec2(45 + headerOffsetX, 110));
                     const char* sectionNames[] = { "COMBAT", "MOVEMENT", "VISUAL", "UTILITY", "NETWORK", "PLUGINS" };
                     ImVec2 headerPos = ImGui::GetCursorScreenPos();
                     ImGui::TextColored(ImVec4(0.35f, 0.50f, 0.60f, contentAlpha), "%s", sectionNames[g_CurrentTab]);
@@ -3129,7 +3212,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     float lineW = headerSize.x * EaseOutQuint(g_SectionHeaderAnim);
                     dl->AddLine(ImVec2(headerPos.x, headerPos.y + headerSize.y + 6), ImVec2(headerPos.x + lineW, headerPos.y + headerSize.y + 6), IM_COL32(50, 130, 190, (int)(100 * g_SectionHeaderAnim * contentAlpha)));
 
-                    ImGui::SetCursorPos(ImVec2(45, 85));
+                    ImGui::SetCursorPos(ImVec2(45, 155));
                     ImGui::BeginGroup();
 
                     // Helper macro for staggered widget animation
@@ -3149,7 +3232,20 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(0, "KillAura");
                         if (g_ExpandAnims[2] > 0.01f) {
                             float ea = wAlpha0 * g_ExpandAnims[2];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(2, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             static const char* auraMode[] = { "Single", "Switch", "Multi" };
                             StyledCombo("Mode", &g_ComboSelections[0], auraMode, 3, ea, 0); ImGui::Spacing();
                             static const char* auraPriority[] = { "Distance", "Health", "Angle" };
@@ -3177,7 +3273,11 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                                 }
                             }
 
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3185,10 +3285,27 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(1, "Velocity");
                         if (g_ExpandAnims[7] > 0.01f) {
                             float ea = wAlpha1 * g_ExpandAnims[7];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(7, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedSlider("Horizontal", &g_SliderVals[14], 0.0f, 100.0f, "%.0f %%", dt, ea); ImGui::Spacing();
                             AnimatedSlider("Vertical", &g_SliderVals[15], 0.0f, 100.0f, "%.0f %%", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3196,10 +3313,27 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(2, "AimAssist");
                         if (g_ExpandAnims[5] > 0.01f) {
                             float ea = wAlpha2 * g_ExpandAnims[5];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(5, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedSlider("Speed", &g_SliderVals[7], 1.0f, 10.0f, "%.1f", dt, ea); ImGui::Spacing();
                             AnimatedSlider("FOV", &g_SliderVals[8], 10.0f, 360.0f, "%.0f deg", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3207,9 +3341,26 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(3, "AutoClicker");
                         if (g_ExpandAnims[6] > 0.01f) {
                             float ea = wAlpha3 * g_ExpandAnims[6];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(6, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedRangeSlider("CPS", &g_SliderVals[9], &g_SliderVals[10], 1.0f, 25.0f, "%.0f - %.0f", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3217,10 +3368,27 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(4, "TriggerBot");
                         if (g_ExpandAnims[8] > 0.01f) {
                             float ea = wAlpha4 * g_ExpandAnims[8];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(8, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedRangeSlider("CPS", &g_SliderVals[11], &g_SliderVals[12], 1.0f, 25.0f, "%.0f - %.0f", dt, ea); ImGui::Spacing();
                             AnimatedSlider("Reach", &g_SliderVals[13], 3.0f, 6.0f, "%.1f blocks", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
 
@@ -3233,11 +3401,28 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(1, "Fly");
                         if (g_ExpandAnims[1] > 0.01f) {
                             float ea = wAlpha1 * g_ExpandAnims[1];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(1, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             static const char* flyMode[] = { "Vanilla", "Creative", "Glide", "Freeze" };
                             StyledCombo("Fly Mode", &g_ComboSelections[1], flyMode, 4, ea, 1); ImGui::Spacing();
                             AnimatedSlider("Speed", &g_SliderVals[1], 1.0f, 5.0f, "%.1f x", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
 
@@ -3245,11 +3430,28 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(2, "Speed");
                         if (g_ExpandAnims[4] > 0.01f) {
                             float ea = wAlpha2 * g_ExpandAnims[4];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(4, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             static const char* speedMode[] = { "Ground", "Boost", "BHop" };
                             StyledCombo("Mode", &g_ComboSelections[4], speedMode, 3, ea, 4); ImGui::Spacing();
                             AnimatedSlider("Multiplier", &g_SliderVals[2], 1.0f, 4.0f, "%.1f x", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
 
@@ -3267,7 +3469,20 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(5, "Scaffold");
                         if (g_ExpandAnims[10] > 0.01f) {
                             float ea = wAlpha5 * g_ExpandAnims[10];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(10, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             static const char* scaffoldModes[] = { "Normal", "Legit", "NoShift", "Tower" };
                             StyledCombo("Mode", &g_ComboSelections[6], scaffoldModes, 4, ea, 6); ImGui::Spacing();
                             if (g_Toggles[35].value) {
@@ -3277,7 +3492,11 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             AnimatedToggle("Tower", g_Toggles[14], dt, ea); ImGui::Spacing();
                             AnimatedToggle("Expand", g_Toggles[15], dt, ea); ImGui::Spacing();
                             AnimatedToggle("Assist View", g_Toggles[35], dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 2) {
@@ -3285,7 +3504,20 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(0, "ESP");
                         if (g_ExpandAnims[0] > 0.01f) {
                             float ea = wAlpha0 * g_ExpandAnims[0];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(0, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             
                             static const char* espModes[] = { "2D Box", "3D Box" };
                             StyledCombo("Mode", &g_ComboSelections[3], espModes, 2, ea, 3); ImGui::Spacing();
@@ -3296,7 +3528,11 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             AnimatedToggle("Team Color", g_Toggles[27], dt, ea); ImGui::Spacing();
                             AnimatedToggle("Health Bar", g_Toggles[9], dt, ea);
                             
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3304,12 +3540,29 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(1, "Tracer");
                         if (g_ExpandAnims[8] > 0.01f) {
                             float ea = wAlpha1 * g_ExpandAnims[8];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(8, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedToggle("Player##Tracer", g_Toggles[29], dt, ea); MiniColorPicker("##tpc", g_Colors[0], ea); ImGui::Spacing();
                             AnimatedToggle("Hostile##Tracer", g_Toggles[30], dt, ea); MiniColorPicker("##thc", g_Colors[1], ea); ImGui::Spacing();
                             AnimatedToggle("Passive##Tracer", g_Toggles[31], dt, ea); MiniColorPicker("##tac", g_Colors[2], ea); ImGui::Spacing();
                             AnimatedToggle("Team Color##Tracer", g_Toggles[32], dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3318,14 +3571,31 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(2, "ArrayList");
                         if (g_ExpandAnims[9] > 0.01f) {
                             float ea = wAlpha2 * g_ExpandAnims[9];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(9, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedToggle("Rainbow Mode", g_Toggles[24], dt, ea); ImGui::Spacing();
                             static const char* gradOpts[] = { "Off", "Horizontal", "Vertical" };
                             StyledCombo("Gradient", &g_ComboSelections[5], gradOpts, 3, ea, 5); ImGui::Spacing();
                             AnimatedSlider("Anim Speed", &g_SliderVals[24], 0.5f, 5.0f, "%.1fx", dt, ea); ImGui::Spacing();
                             ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, ea), "Colors"); MiniColorPicker("##alc1", g_ArrayListColors[0], ea); 
                             ImGui::SameLine(0, 4); MiniColorPicker("##alc2", g_ArrayListColors[1], ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3333,10 +3603,27 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(3, "TargetHUD");
                         if (g_ExpandAnims[3] > 0.01f) {
                             float ea = wAlpha3 * g_ExpandAnims[3];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(3, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedSlider("Fade Speed", &g_SliderVals[3], 2.0f, 25.0f, "%.1f", dt, ea); ImGui::Spacing();
-                            AnimatedSlider("Target Range", &g_SliderVals[23], 5.0f, 100.0f, "%.0fm", dt, ea);
-                            ImGui::Unindent(20.0f);
+                            AnimatedSlider("Hold Time", &g_SliderVals[28], 1.0f, 15.0f, "%.1f s", dt, ea);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                         
@@ -3344,9 +3631,26 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(4, "PlayerModel");
                         if (g_ExpandAnims[13] > 0.01f) {
                             float ea = wAlpha4 * g_ExpandAnims[13];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(13, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedSlider("Scale", &g_SliderVals[27], 10.0f, 150.0f, "%.0f", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 3) {
@@ -3372,9 +3676,26 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(4, "BedBreaker");
                         if (g_ExpandAnims[11] > 0.01f) {
                             float ea = wAlpha4 * g_ExpandAnims[11];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(11, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedSlider("Radius", &g_SliderVals[25], 10.0f, 40.0f, "%.1f px", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 4) {
@@ -3382,9 +3703,26 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         MODULE_BIND(0, "FakeLag");
                         if (g_ExpandAnims[12] > 0.01f) {
                             float ea = wAlpha0 * g_ExpandAnims[12];
-                            ImGui::Indent(20.0f);
+                            float savedY = ImGui::GetCursorPosY();
+                              float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
+                              float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
+                              ImDrawList* dl = ImGui::GetWindowDrawList();
+                              dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * ea)), 10.0f, ImDrawFlags_RoundCornersRight);
+                              dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * ea)));
+                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
+                              ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
+                              BeginSmoothScrollChild(12, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
+                              ImGui::SetCursorPos(ImVec2(25, 25));
+                              ImGui::BeginGroup();
                             AnimatedSlider("Duration", &g_SliderVals[26], 50.0f, 2000.0f, "%.0f ms", dt, ea); ImGui::Spacing();
-                            ImGui::Unindent(20.0f);
+                            ImGui::EndGroup();
+                              ImGui::EndChild();
+                              ImGui::PopStyleColor();
+                              ImGui::PopStyleVar();
+                              ImGui::SetCursorPos(ImVec2(45, savedY));
                         }
                         ImGui::Spacing();
                     } else if (g_CurrentTab == 5) {
@@ -3456,6 +3794,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     ImGui::EndChild();
                 }
                 ImGui::End();
+                g_ResetPanelScrolls = false;
                 ImGui::PopStyleColor(); // Pop WindowBg
                 ImGui::PopStyleVar(3); // WindowPadding, WindowBorderSize, WindowRounding
                 ImGui::PopStyleVar();

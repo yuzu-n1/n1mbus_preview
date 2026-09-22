@@ -38,6 +38,11 @@ public:
 
     KillAura() : Module("KillAura") {}
 
+    void onDisable() override {
+        extern int g_KillAuraTargetId;
+        g_KillAuraTargetId = -1;
+    }
+
     void onUpdate(JNIEnv* env, jobject mcObj, jobject playerObj, jclass playerClass) override {
         if (!env || !mcObj || !playerObj || !playerClass) return;
 
@@ -151,7 +156,8 @@ public:
         };
 
         std::vector<TargetCandidate> candidates;
-        double maxDistSq = (double)reach * reach;
+        double searchDistSq = 7.5 * 7.5;
+        double attackDistSq = (double)reach * reach;
 
         bool readyToAttack = false;
         if (m_lastClickTime == 0) m_lastClickTime = now;
@@ -199,7 +205,7 @@ public:
             double dx = ex - myX, dy = (ey + 1.0) - (myY + 1.62), dz = ez - myZ;
             double distSq = dx*dx + dy*dy + dz*dz;
 
-            if (distSq > maxDistSq) { env->DeleteLocalRef(entObj); continue; }
+            if (distSq > searchDistSq) { env->DeleteLocalRef(entObj); continue; }
 
             // FOV Check
             float yawTo = (float)(std::atan2(dz, dx) * 180.0 / 3.14159265358979) - 90.0f;
@@ -277,9 +283,11 @@ public:
 
                     _notifyAgentSilentRotation(env, aimYaw, aimPitch);
 
-                    if (swingMeth) env->CallVoidMethod(playerObj, swingMeth);
-                    env->CallVoidMethod(controllerObj, attackMeth, playerObj, target.obj);
-                    _ex(env);
+                    if (target.distSq <= attackDistSq) {
+                        if (swingMeth) env->CallVoidMethod(playerObj, swingMeth);
+                        env->CallVoidMethod(controllerObj, attackMeth, playerObj, target.obj);
+                        _ex(env);
+                    }
 
                     if (yawF) env->SetFloatField(playerObj, yawF, origYaw);
                     if (pitchF) env->SetFloatField(playerObj, pitchF, origPitch);
@@ -289,11 +297,13 @@ public:
                     if (yawHeadF) env->SetFloatField(playerObj, yawHeadF, aimYaw);
                     if (renderYawOffsetF) env->SetFloatField(playerObj, renderYawOffsetF, aimYaw);
 
-                    multiHitCount++;
-                    m_lastTargetId = target.id;
-                    g_LastAttackedEntityId = target.id;
-                    g_LastAttackTime = g_GlobalTime;
-                    _captureAttackedName(env, entityClass, target.obj);
+                    if (target.distSq <= attackDistSq) {
+                        multiHitCount++;
+                        m_lastTargetId = target.id;
+                        g_LastAttackedEntityId = target.id;
+                        g_LastAttackTime = g_GlobalTime;
+                        _captureAttackedName(env, entityClass, target.obj);
+                    }
                 }
                 m_lastClickTime = now;
                 int cMin = minCps, cMax = maxCps;
@@ -376,18 +386,20 @@ public:
                 // (silent arming runs every frame above; no extra packets here)
                 // 1.8 vanilla order: swing (C0A) BEFORE attack (C02).
                 // Grim PacketOrderB 1.8 requires ANIMATION pre-attack.
-                if (swingMeth) {
-                    env->CallVoidMethod(playerObj, swingMeth);
-                    _ex(env);
-                }
+                if (bestTarget.distSq <= attackDistSq) {
+                    if (swingMeth) {
+                        env->CallVoidMethod(playerObj, swingMeth);
+                        _ex(env);
+                    }
 
-                env->CallVoidMethod(controllerObj, attackMeth, playerObj, bestTarget.obj);
-                _ex(env);
-                
-                m_lastTargetId = bestTarget.id;
-                g_LastAttackedEntityId = bestTarget.id;
-                g_LastAttackTime = g_GlobalTime;
-                _captureAttackedName(env, entityClass, bestTarget.obj);
+                    env->CallVoidMethod(controllerObj, attackMeth, playerObj, bestTarget.obj);
+                    _ex(env);
+                    
+                    m_lastTargetId = bestTarget.id;
+                    g_LastAttackedEntityId = bestTarget.id;
+                    g_LastAttackTime = g_GlobalTime;
+                    _captureAttackedName(env, entityClass, bestTarget.obj);
+                }
 
                 if (mode == 1) {
                     m_switchIndex = (m_switchIndex + 1) % candidates.size();
