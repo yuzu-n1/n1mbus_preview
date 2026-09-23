@@ -1,5 +1,6 @@
 #include "hook.hpp"
 #include "telemetry.hpp"
+#include "news.hpp"
 #include <windows.h>
 #include <gl/GL.h>
 #include <thread>
@@ -46,6 +47,10 @@ WNDPROC o_WndProc = nullptr;
 HWND g_hWnd = nullptr;
 bool g_Initialized = false;
 static bool g_ShowMenu = false;
+std::vector<NewsItem> g_NewsItems;
+bool g_NewsLoaded = false;
+bool g_NewsFailed = false;
+std::mutex g_NewsMutex;
 static char g_SearchBuffer[128] = ""; // Module search filter
 bool g_ResetPanelScrolls = false;
 float g_PanelSmoothScroll[15] = {}; // Per-panel smooth scroll targets, indexed by ExpandStates index
@@ -88,7 +93,7 @@ int g_InfoIconW = 0, g_InfoIconH = 0;
 int g_CurrentTab = 0, g_TargetTab = 0;
 float g_TabSlideAnim = 1.0f;
 float g_IndicatorY = 0.0f, g_IndicatorTargetY = 0.0f;
-float g_TabHoverAnim[5] = {};
+float g_TabHoverAnim[10] = {};
 float g_SectionHeaderAnim = 0.0f;
 float g_MenuScale = 0.0f;
 float g_WidgetStagger[20] = {};
@@ -692,12 +697,68 @@ static bool AnimatedModuleToggle(const char* label, Module* mod, float dt, float
     return true;
 }
 
+// ── Keybind helpers ──
+
+struct BindEntry { int vk = 0; };
+static std::map<std::string, BindEntry> g_ModuleBinds;
+
+static const char* VkName(int vk) {
+    switch (vk) {
+        case 0x08: return "BkSp"; case 0x09: return "Tab"; case 0x0D: return "Enter";
+        case 0x10: return "Shift"; case 0x11: return "Ctrl"; case 0x12: return "Alt";
+        case 0x1B: return "Esc"; case 0x20: return "Space";
+        case 0x21: return "PgUp"; case 0x22: return "PgDn";
+        case 0x23: return "End"; case 0x24: return "Home";
+        case 0x25: return "Left"; case 0x26: return "Up"; case 0x27: return "Right"; case 0x28: return "Down";
+        case 0x2D: return "Ins"; case 0x2E: return "Del";
+        default:
+            if (vk >= 0x30 && vk <= 0x39) { static char buf[2]; buf[0] = '0' + (vk - 0x30); buf[1] = 0; return buf; }
+            if (vk >= 0x41 && vk <= 0x5A) { static char buf[2]; buf[0] = 'A' + (vk - 0x41); buf[1] = 0; return buf; }
+            if (vk >= 0x70 && vk <= 0x7B) { static char buf[8]; snprintf(buf, sizeof(buf), "F%d", vk - 0x70 + 1); return buf; }
+            if (vk == 0xA0) return "LShift"; if (vk == 0xA1) return "RShift";
+            if (vk == 0xA2) return "LCtrl";  if (vk == 0xA3) return "RCtrl";
+            if (vk == 0xA4) return "LAlt";   if (vk == 0xA5) return "RAlt";
+            return "?";
+    }
+}
+
+// Map module names to their ToggleState pointer for keybind dispatch
+static ToggleState* GetModToggle(const std::string& name) {
+    struct { const char* name; ToggleState* ts; } map[] = {
+        {"KillAura",    &g_Toggles[0]},  {"Velocity",     &g_Toggles[1]},
+        {"AimAssist",   &g_Toggles[2]},  {"AutoClicker",  &g_Toggles[3]},
+        {"AutoSprint",  &g_Toggles[4]},  {"Fly",          &g_Toggles[5]},
+        {"SprintReset", &g_Toggles[6]},  {"NoFall",       &g_Toggles[7]},
+        {"ESP",         &g_Toggles[8]},  {"TargetHUD",    &g_Toggles[17]},
+        {"Speed",       &g_Toggles[18]}, {"Scaffold",     &g_Toggles[19]},
+        {"SafeWalk",    &g_Toggles[23]}, {"TriggerBot",   &g_Toggles[21]},
+        {"BedBreaker",  &g_Toggles[25]}, {"FakeLag",      &g_Toggles[33]},
+        {"Tracer",      &g_Toggles[28]}, {"ArrayList",    &g_Toggles[22]},
+        {"PlayerModel", &g_Toggles[34]}, {"AutoTool",     &g_Toggles[12]}
+    };
+    for (auto& e : map) if (name == e.name) return e.ts;
+    return nullptr;
+}
+
+static std::string g_BindListening;
+static std::string g_ExpandedModName;
+static std::string g_ExpandedModCategory;
+
+static const char* GetModuleCategory(const std::string& name) {
+    if (name == "KillAura" || name == "Velocity" || name == "AimAssist" || name == "AutoClicker" || name == "TriggerBot") return "COMBAT";
+    if (name == "Fly" || name == "Flight" || name == "Flight [Unsafe]" || name == "Speed" || name == "Speed [Unsafe]" || name == "Scaffold") return "MOVEMENT";
+    if (name == "ESP" || name == "Tracer" || name == "ArrayList" || name == "TargetHUD" || name == "PlayerModel" || name == "PlayerModel [Bugged]") return "VISUAL";
+    if (name == "BedBreaker" || name == "BedBreaker [Unsafe]" || name == "FakeLag") return "UTILITY";
+    return "PLUGINS";
+}
+
 static bool AnimatedExpandableToggle(const char* label, ToggleState& state, float dt, float alphaMultiplier, bool* expandState, float* expandAnim) {
     ImGui::PushID(label);
-    float fullW = 250.0f, toggleW = 44.0f, toggleH = 22.0f;
+    float fullW = 280.0f, toggleW = 44.0f, toggleH = 22.0f;
+    float rowHeight = 56.0f; // Increased height to 56 for a very spacious hover area
     ImVec2 pos = ImGui::GetCursorScreenPos();
     
-    ImGui::InvisibleButton("##row", ImVec2(fullW, 20.0f));
+    ImGui::InvisibleButton("##row", ImVec2(fullW, rowHeight));
     bool hovered = ImGui::IsItemHovered();
     if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
@@ -706,16 +767,51 @@ static bool AnimatedExpandableToggle(const char* label, ToggleState& state, floa
     
     float toggleX = pos.x + fullW - toggleW;
     
+    const char* labelEnd = strstr(label, "##");
+    std::string cleanLabel = label;
+    if (labelEnd) cleanLabel = std::string(label, labelEnd - label);
+    
+    bool hasBugged = false;
+    auto bugPos = cleanLabel.find(" [Bugged]");
+    if (bugPos != std::string::npos) {
+        hasBugged = true;
+        cleanLabel.erase(bugPos);
+    }
+    
+    bool hasUnsafe = false;
+    auto unsafePos = cleanLabel.find(" [Unsafe]");
+    if (unsafePos != std::string::npos) {
+        hasUnsafe = true;
+        cleanLabel.erase(unsafePos);
+    }
+
+    bool listening = (g_BindListening == cleanLabel);
+
+    // Calculate Bind text width to restrict click area
+    auto& entry = g_ModuleBinds[cleanLabel];
+    char bindLabel[64];
+    if (listening) snprintf(bindLabel, sizeof(bindLabel), "Bind: ...");
+    else if (entry.vk) snprintf(bindLabel, sizeof(bindLabel), "Bind: %s", VkName(entry.vk));
+    else snprintf(bindLabel, sizeof(bindLabel), "Bind: None");
+    
+    float bindTextW = ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize() * 0.85f, FLT_MAX, 0.0f, bindLabel).x;
+    float bindHitW = bindTextW + 6.0f + 12.0f; // text + spacing + icon size
+    bool bindHovered = hovered && (clickPos.y >= pos.y + 30.0f) && (clickPos.x <= pos.x + 10.0f + bindHitW);
+
     if (clicked) {
-        if (clickPos.x > toggleX - 10) {
+        if (clickPos.x > toggleX - 10 && clickPos.y < pos.y + 30.0f) {
             state.value = !state.value;
             SaveConfig();
+        } else if (bindHovered) {
+            g_BindListening = listening ? "" : cleanLabel;
         } else {
             bool newState = !*expandState;
             if (newState) {
                 for (int i = 0; i < 15; i++) {
                     g_ExpandStates[i] = false;
                 }
+                g_ExpandedModName = cleanLabel;
+                g_ExpandedModCategory = GetModuleCategory(cleanLabel);
             }
             *expandState = newState;
         }
@@ -727,82 +823,75 @@ static bool AnimatedExpandableToggle(const char* label, ToggleState& state, floa
     ImDrawList* dl = ImGui::GetWindowDrawList();
     int baseA = (int)(255 * alphaMultiplier);
     
-    ImU32 arrowCol = IM_COL32(180,185,190,baseA);
-    float cx = pos.x + 6;
-    float cy = pos.y + 10;
+    static std::map<ImGuiID, float> hoverAnims;
+    float& hAnim = hoverAnims[ImGui::GetID(label)];
+    hAnim = Lerp(hAnim, hovered ? 1.0f : 0.0f, dt * 8.0f);
+    if (hAnim > 0.01f) {
+        dl->AddRectFilled(ImVec2(pos.x - 12.0f, pos.y), ImVec2(pos.x + fullW, pos.y + rowHeight), IM_COL32(255, 255, 255, (int)(45 * hAnim * alphaMultiplier)), 8.0f);
+    }
     
-    float t_arr = *expandAnim; // 0.0f (right) to 1.0f (down)
-    float angle = t_arr * 1.57079632679f; 
-    float s_arr = sinf(angle), c_arr = cosf(angle);
+    if (*expandAnim > 0.01f) {
+        float lineH = 28.0f * (*expandAnim);
+        dl->AddRectFilled(ImVec2(pos.x - 12.0f, pos.y + rowHeight*0.5f - lineH * 0.5f), ImVec2(pos.x - 9.0f, pos.y + rowHeight*0.5f + lineH * 0.5f), IM_COL32(255, 255, 255, (int)(255 * (*expandAnim) * alphaMultiplier)), 2.0f);
+    }
+
+    ImU32 textCol = hovered ? IM_COL32(255,255,255,baseA) : IM_COL32(210,215,220,baseA);
+
+    DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x + 10, pos.y + 11), textCol, IM_COL32(100, 180, 255, baseA), cleanLabel.c_str(), nullptr, g_SearchBuffer);
+
+    float currentTagX = pos.x + 14 + ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, cleanLabel.c_str()).x + 8;
+    float tagY = pos.y + 12;
+
+    if (hasBugged) {
+        float tagW = 38.0f;
+        float tagH = 14.0f;
+        dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(240, 200, 50, baseA), tagH * 0.5f);
+        ImFont* font = ImGui::GetFont();
+        float s = ImGui::GetFontSize() * 0.75f;
+        float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "BUG").x;
+        dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(0, 0, 0, baseA), "BUG");
+        currentTagX += tagW + 4;
+    }
+
+    if (hasUnsafe) {
+        float tagW = 54.0f;
+        float tagH = 14.0f;
+        dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(220, 50, 50, baseA), tagH * 0.5f);
+        ImFont* font = ImGui::GetFont();
+        float s = ImGui::GetFontSize() * 0.75f;
+        float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "UNSAFE").x;
+        dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(255, 255, 255, baseA), "UNSAFE");
+        currentTagX += tagW + 4;
+    }
     
-    ImVec2 p1(-2.5f, -3.5f);
-    ImVec2 p2( 1.5f,  0.0f);
-    ImVec2 p3(-2.5f,  3.5f);
-    
-    ImVec2 r1(p1.x * c_arr - p1.y * s_arr + cx, p1.x * s_arr + p1.y * c_arr + cy);
-    ImVec2 r2(p2.x * c_arr - p2.y * s_arr + cx, p2.x * s_arr + p2.y * c_arr + cy);
-    ImVec2 r3(p3.x * c_arr - p3.y * s_arr + cx, p3.x * s_arr + p3.y * c_arr + cy);
-    
-    dl->AddLine(r1, r2, arrowCol, 2.0f);
-    dl->AddLine(r2, r3, arrowCol, 2.0f);
-
-                ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
-      const char* labelEnd = strstr(label, "##");
-      
-      std::string cleanLabel = label;
-      if (labelEnd) cleanLabel = std::string(label, labelEnd - label);
-      
-      bool hasBugged = false;
-      auto bugPos = cleanLabel.find(" [Bugged]");
-      if (bugPos != std::string::npos) {
-          hasBugged = true;
-          cleanLabel.erase(bugPos);
-      }
-      
-      bool hasUnsafe = false;
-      auto unsafePos = cleanLabel.find(" [Unsafe]");
-      if (unsafePos != std::string::npos) {
-          hasUnsafe = true;
-          cleanLabel.erase(unsafePos);
-      }
-
-      DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x + 16, pos.y + 2), textCol, IM_COL32(100, 180, 255, baseA), cleanLabel.c_str(), nullptr, g_SearchBuffer);
-
-      float currentTagX = pos.x + 16 + ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, cleanLabel.c_str()).x + 8;
-      float tagY = pos.y + 3;
-
-      if (hasBugged) {
-          float tagW = 38.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(240, 200, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "BUG").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(0, 0, 0, baseA), "BUG");
-          currentTagX += tagW + 4;
-      }
-
-      if (hasUnsafe) {
-          float tagW = 54.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(220, 50, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "UNSAFE").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(255, 255, 255, baseA), "UNSAFE");
-          currentTagX += tagW + 4;
-      }
-    
+    // Draw toggle
     float r = toggleH * 0.5f;
     ImU32 trackCol = IM_COL32((int)Lerp(35,45,state.anim), (int)Lerp(45,120,state.anim), (int)Lerp(55,180,state.anim), baseA);
-    dl->AddRectFilled(ImVec2(toggleX, pos.y + 1), ImVec2(toggleX + toggleW, pos.y + 1 + toggleH), trackCol, r);
-    if (hovered && clickPos.x > toggleX - 10) dl->AddRectFilled(ImVec2(toggleX, pos.y + 1), ImVec2(toggleX + toggleW, pos.y + 1 + toggleH), IM_COL32(255,255,255,(int)(15*alphaMultiplier)), r);
+    dl->AddRectFilled(ImVec2(toggleX, pos.y + 10), ImVec2(toggleX + toggleW, pos.y + 10 + toggleH), trackCol, r);
+    if (hovered && clickPos.x > toggleX - 10 && clickPos.y < pos.y + 30.0f) dl->AddRectFilled(ImVec2(toggleX, pos.y + 10), ImVec2(toggleX + toggleW, pos.y + 10 + toggleH), IM_COL32(255,255,255,(int)(15*alphaMultiplier)), r);
     
     float knobR = toggleH * 0.38f;
     float knobX = Lerp(toggleX + r, toggleX + toggleW - r, EaseOutBack(state.anim));
-    dl->AddCircleFilled(ImVec2(knobX, pos.y + 1 + r), knobR, IM_COL32(245,248,252,baseA));
-    dl->AddCircle(ImVec2(knobX, pos.y + 1 + r), knobR + 0.5f, IM_COL32(0,0,0,(int)(30*alphaMultiplier)));
+    dl->AddCircleFilled(ImVec2(knobX, pos.y + 10 + r), knobR, IM_COL32(245,248,252,baseA));
+    dl->AddCircle(ImVec2(knobX, pos.y + 10 + r), knobR + 0.5f, IM_COL32(0,0,0,(int)(30*alphaMultiplier)));
     
+    // Draw bind text
+    float bindAlpha = alphaMultiplier * 0.7f;
+    ImU32 bindCol = listening ? IM_COL32(100,200,255,(int)(255*bindAlpha))
+        : bindHovered ? IM_COL32(180,190,200,(int)(255*bindAlpha))
+        : IM_COL32(140,150,160,(int)(255*bindAlpha));
+        
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 0.85f, ImVec2(pos.x + 10.0f, pos.y + 32.0f), bindCol, bindLabel);
+    
+    if (!listening && g_EditIconTex) {
+        float iconSize = 12.0f;
+        ImVec2 iconPos(pos.x + 10.0f + bindTextW + 6.0f, pos.y + 32.0f + 1.0f);
+        dl->AddImage((void*)(intptr_t)g_EditIconTex,
+            iconPos, ImVec2(iconPos.x + iconSize, iconPos.y + iconSize),
+            ImVec2(0,0), ImVec2(1,1),
+            IM_COL32(255,255,255,(int)(180*bindAlpha)));
+    }
+
     ImGui::PopID();
     return true;
 }
@@ -1063,50 +1152,7 @@ BOOL WINAPI hk_GetCursorPos(LPPOINT lpPoint) {
 }
 BOOL WINAPI hk_ClipCursor(const RECT* lpRect) { if (g_ShowMenu || g_HudEditorMode) return o_ClipCursor(NULL); return o_ClipCursor(lpRect); }
 
-// ── Keybind helpers ──
 
-struct BindEntry { int vk = 0; };
-static std::map<std::string, BindEntry> g_ModuleBinds;
-
-static const char* VkName(int vk) {
-    switch (vk) {
-        case 0x08: return "BkSp"; case 0x09: return "Tab"; case 0x0D: return "Enter";
-        case 0x10: return "Shift"; case 0x11: return "Ctrl"; case 0x12: return "Alt";
-        case 0x1B: return "Esc"; case 0x20: return "Space";
-        case 0x21: return "PgUp"; case 0x22: return "PgDn";
-        case 0x23: return "End"; case 0x24: return "Home";
-        case 0x25: return "Left"; case 0x26: return "Up"; case 0x27: return "Right"; case 0x28: return "Down";
-        case 0x2D: return "Ins"; case 0x2E: return "Del";
-        default:
-            if (vk >= 0x30 && vk <= 0x39) { static char buf[2]; buf[0] = '0' + (vk - 0x30); buf[1] = 0; return buf; }
-            if (vk >= 0x41 && vk <= 0x5A) { static char buf[2]; buf[0] = 'A' + (vk - 0x41); buf[1] = 0; return buf; }
-            if (vk >= 0x70 && vk <= 0x7B) { static char buf[8]; snprintf(buf, sizeof(buf), "F%d", vk - 0x70 + 1); return buf; }
-            if (vk == 0xA0) return "LShift"; if (vk == 0xA1) return "RShift";
-            if (vk == 0xA2) return "LCtrl";  if (vk == 0xA3) return "RCtrl";
-            if (vk == 0xA4) return "LAlt";   if (vk == 0xA5) return "RAlt";
-            return "?";
-    }
-}
-
-// Map module names to their ToggleState pointer for keybind dispatch
-static ToggleState* GetModToggle(const std::string& name) {
-    struct { const char* name; ToggleState* ts; } map[] = {
-        {"KillAura",    &g_Toggles[0]},  {"Velocity",     &g_Toggles[1]},
-        {"AimAssist",   &g_Toggles[2]},  {"AutoClicker",  &g_Toggles[3]},
-        {"AutoSprint",  &g_Toggles[4]},  {"Fly",          &g_Toggles[5]},
-        {"SprintReset", &g_Toggles[6]},  {"NoFall",       &g_Toggles[7]},
-        {"ESP",         &g_Toggles[8]},  {"TargetHUD",    &g_Toggles[17]},
-        {"Speed",       &g_Toggles[18]}, {"Scaffold",     &g_Toggles[19]},
-        {"SafeWalk",    &g_Toggles[23]}, {"TriggerBot",   &g_Toggles[21]},
-        {"BedBreaker",  &g_Toggles[25]}, {"FakeLag",      &g_Toggles[33]},
-        {"Tracer",      &g_Toggles[28]}, {"ArrayList",    &g_Toggles[22]},
-        {"PlayerModel", &g_Toggles[34]}, {"AutoTool",     &g_Toggles[12]}
-    };
-    for (auto& e : map) if (name == e.name) return e.ts;
-    return nullptr;
-}
-
-static std::string g_BindListening;
 
 static void ModuleKeybindWidget(const std::string& modName, ToggleState* fallbackTs, float dt, float alpha) {
     auto& entry = g_ModuleBinds[modName];
@@ -1396,6 +1442,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
     }
 
     if (!g_Initialized) {
+        NewsAPI::FetchNewsAsync();
         g_hWnd = WindowFromDC(hDc);
         if (g_hWnd) {
             o_WndProc = (WNDPROC)SetWindowLongPtr(g_hWnd, GWLP_WNDPROC, (LONG_PTR)WndProcHook);
@@ -1411,6 +1458,11 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                 loaded = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 18.0f, &fontCfg);
             }
             if (!loaded) loaded = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f, &fontCfg);
+
+            ImFontConfig jpCfg;
+            jpCfg.MergeMode = true;
+            jpCfg.OversampleH = 2; jpCfg.OversampleV = 2;
+            io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\meiryo.ttc", 18.0f, &jpCfg, io.Fonts->GetGlyphRangesJapanese());
 
             ImFontConfig icons_config;
             icons_config.MergeMode = true;
@@ -3518,11 +3570,11 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     }
                     dl->AddLine(ImVec2(wp.x + 25, wp.y + (g_BannerTex ? 12 + (sidebarW - 40) * g_BannerH / g_BannerW + 15 : 75)), ImVec2(wp.x + sidebarW - 25, wp.y + (g_BannerTex ? 12 + (sidebarW - 40) * g_BannerH / g_BannerW + 15 : 75)), IM_COL32(255, 255, 255, (int)(12 * MAlpha)));
 
-                    const char* tabNames[] = { "Combat", "Movement", "Render", "Utility", "Network", "Plugins" };
-                    const char* tabIcons[] = { ICON_FA_SHIELD, ICON_FA_PERSON_RUNNING, ICON_FA_EYE, ICON_FA_GEAR, ICON_FA_WIFI, ICON_FA_PUZZLE_PIECE };
+                    const char* tabNames[] = { "Overview", "Combat", "Movement", "Render", "Utility", "Network", "Plugins" };
+                    const char* tabIcons[] = { ICON_FA_HOUSE, ICON_FA_SHIELD, ICON_FA_PERSON_RUNNING, ICON_FA_EYE, ICON_FA_GEAR, ICON_FA_WIFI, ICON_FA_PUZZLE_PIECE };
                     float tabStartY = 130.0f, tabH = 45.0f;
 
-                    for (int i = 0; i < 6; i++) {
+                    for (int i = 0; i < 7; i++) {
                         float itemY = tabStartY + i * tabH;
                         ImVec2 tabMin(wp.x + 8, wp.y + itemY), tabMax(wp.x + sidebarW - 8, wp.y + itemY + tabH - 4);
                         ImGui::SetCursorPos(ImVec2(8, itemY));
@@ -3620,16 +3672,26 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     if (max_ea > 0.01f) {
                         float slideOffset = (1.0f - (max_ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                         float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                        ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y);
+                        ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y);
                         ImVec2 bgBottomRight = ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowSize().x, ImGui::GetWindowPos().y + ImGui::GetWindowSize().y);
                         ImDrawList* dl = ImGui::GetWindowDrawList();
                         dl->AddRectFilled(bgTopLeft, bgBottomRight, IM_COL32(10, 14, 18, int(160 * max_ea * contentAlpha)), 10.0f, ImDrawFlags_RoundCornersRight);
                         dl->AddLine(bgTopLeft, ImVec2(bgTopLeft.x, bgBottomRight.y), IM_COL32(255, 255, 255, int(30 * max_ea * contentAlpha)));
+                        if (!g_ExpandedModName.empty()) {
+                            ImVec2 titlePos = ImVec2(bgTopLeft.x + 25.0f, bgTopLeft.y + 35.0f);
+                            float titleFontSize = ImGui::GetFontSize() * 1.5f;
+                            DrawHighlightedText(dl, ImGui::GetFont(), titleFontSize, titlePos, IM_COL32(255, 255, 255, int(255 * max_ea * contentAlpha)), IM_COL32(100, 180, 255, int(255 * max_ea * contentAlpha)), g_ExpandedModName.c_str(), nullptr, g_SearchBuffer);
+                            if (!g_ExpandedModCategory.empty()) {
+                                float titleW = ImGui::GetFont()->CalcTextSizeA(titleFontSize, FLT_MAX, 0.0f, g_ExpandedModName.c_str()).x;
+                                ImVec2 categoryPos = ImVec2(titlePos.x + titleW + 15.0f, titlePos.y + (titleFontSize - ImGui::GetFontSize()) * 0.5f + 2.0f);
+                                dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), categoryPos, IM_COL32(100, 150, 200, int(200 * max_ea * contentAlpha)), g_ExpandedModCategory.c_str());
+                            }
+                        }
                     }
 
 
                     ImGui::SetCursorPos(ImVec2(45 + headerOffsetX, 110));
-                    const char* sectionNames[] = { "COMBAT", "MOVEMENT", "VISUAL", "UTILITY", "NETWORK", "PLUGINS" };
+                    const char* sectionNames[] = { "OVERVIEW", "COMBAT", "MOVEMENT", "VISUAL", "UTILITY", "NETWORK", "PLUGINS" };
                     ImVec2 headerPos = ImGui::GetCursorScreenPos();
                     ImGui::TextColored(ImVec4(0.35f, 0.50f, 0.60f, contentAlpha), "%s", sectionNames[g_CurrentTab]);
                     ImVec2 headerSize = ImGui::CalcTextSize(sectionNames[g_CurrentTab]);
@@ -3701,17 +3763,287 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         float wAlpha##idx = contentAlpha * wA##idx; \
                         ImGui::SetCursorPosX(45 + wOff##idx);
 
-                    #define MODULE_BIND(idx, ename) do { \
-                        ImGui::SetCursorPosX(60 + wOff##idx); \
-                        ModuleKeybindWidget(ename, GetModToggle(ename), dt, wAlpha##idx * 0.7f); \
-                    } while(0)
+                    #define MODULE_BIND(idx, ename) /* combined */
 
-                    bool showCombat = searching || g_CurrentTab == 0;
-                    bool showMovement = searching || g_CurrentTab == 1;
-                    bool showVisual = searching || g_CurrentTab == 2;
-                    bool showUtility = searching || g_CurrentTab == 3;
-                    bool showNetwork = searching || g_CurrentTab == 4;
-                    bool showPlugins = searching || g_CurrentTab == 5;
+                    bool showOverview = searching || g_CurrentTab == 0;
+                    bool showCombat = searching || g_CurrentTab == 1;
+                    bool showMovement = searching || g_CurrentTab == 2;
+                    bool showVisual = searching || g_CurrentTab == 3;
+                    bool showUtility = searching || g_CurrentTab == 4;
+                    bool showNetwork = searching || g_CurrentTab == 5;
+                    bool showPlugins = searching || g_CurrentTab == 6;
+
+                    if (showOverview) {
+                        if (!searching) {
+                            float wOff = (1.0f - EaseOutQuint(g_SectionHeaderAnim)) * 20.0f;
+                            ImGui::SetCursorPos(ImVec2(45 + wOff, ImGui::GetCursorPosY() + 10));
+                            
+                            static int overviewSubTab = 0;
+                            const char* subTabs[] = { "Overview", "News", "Credits" };
+                            
+                            for (int i = 0; i < 3; i++) {
+                                bool selected = (overviewSubTab == i);
+                                ImU32 col = selected ? IM_COL32(100, 180, 255, (int)(255 * contentAlpha)) : IM_COL32(150, 150, 150, (int)(255 * contentAlpha));
+                                
+                                ImVec2 p = ImGui::GetCursorScreenPos();
+                                float textW = ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, subTabs[i]).x;
+                                
+                                ImGui::InvisibleButton(subTabs[i], ImVec2(textW, 20));
+                                if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                                if (ImGui::IsItemClicked()) overviewSubTab = i;
+                                
+                                ImGui::GetWindowDrawList()->AddText(p, col, subTabs[i]);
+                                if (selected) {
+                                    ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x, p.y + 18), ImVec2(p.x + textW, p.y + 18), col, 2.0f);
+                                }
+                                
+                                if (i < 2) {
+                                    ImGui::SameLine();
+                                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 15);
+                                }
+                            }
+                            
+                            ImGui::Dummy(ImVec2(0, 15));
+                            
+                            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(230, 235, 240, (int)(255 * contentAlpha)));
+                            
+                            if (overviewSubTab == 0) {
+                                ImGui::SetCursorPosX(45 + wOff);
+                                ImGui::TextWrapped("Nimbus is a utility mod designed to make Minecraft more convenient.");
+                                ImGui::SetCursorPosX(45 + wOff);
+                                ImGui::TextWrapped("This mod is intended for both research and educational purposes.");
+                            } else if (overviewSubTab == 1) {
+                                std::lock_guard<std::mutex> lock(g_NewsMutex);
+                                if (!g_NewsLoaded && !g_NewsFailed) {
+                                    ImGui::SetCursorPosX(45 + wOff);
+                                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, contentAlpha), "Loading news...");
+                                } else if (g_NewsFailed) {
+                                    ImGui::SetCursorPosX(45 + wOff);
+                                    ImGui::TextColored(ImVec4(0.8f, 0.3f, 0.3f, contentAlpha), "Failed to fetch news. Please check your connection.");
+                                } else if (g_NewsItems.empty()) {
+                                    ImGui::SetCursorPosX(45 + wOff);
+                                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, contentAlpha), "No news available.");
+                                } else {
+                                    static int selectedNewsIndex = -1;
+                                    static std::map<int, float> hoverAnims;
+                                    static float backHoverAnim = 0.0f;
+                                    if (selectedNewsIndex == -1) {
+                                        int index = 0;
+                                        for (const auto& item : g_NewsItems) {
+                                            ImGui::PushID(index);
+                                            ImGui::SetCursorPosX(45 + wOff);
+                                            ImVec2 p = ImGui::GetCursorScreenPos();
+                                            float availW = ImGui::GetContentRegionAvail().x - 45;
+                                            
+                                            if (ImGui::InvisibleButton("##news", ImVec2(availW, 55))) {
+                                                selectedNewsIndex = index;
+                                            }
+                                            bool hovered = ImGui::IsItemHovered();
+                                            if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                                            
+                                            float& anim = hoverAnims[index];
+                                            anim = ImLerp(anim, hovered ? 1.0f : 0.0f, ImGui::GetIO().DeltaTime * 12.0f);
+                                            
+                                            ImU32 bgCol = IM_COL32(255, 255, 255, (int)((5 + 15 * anim) * contentAlpha));
+                                            ImU32 borderCol = IM_COL32(255, 255, 255, (int)((20 + 40 * anim) * contentAlpha));
+                                            
+                                            ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + availW, p.y + 55), bgCol, 6.0f);
+                                            ImGui::GetWindowDrawList()->AddRect(p, ImVec2(p.x + availW, p.y + 55), borderCol, 6.0f);
+                                            
+                                            ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + 15, p.y + 12), IM_COL32(255, 255, 255, (int)(255 * contentAlpha)), item.title.c_str());
+                                            ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + 15, p.y + 32), IM_COL32(150, 150, 150, (int)(255 * contentAlpha)), item.date.c_str());
+                                            
+                                            ImGui::PopID();
+                                            ImGui::Dummy(ImVec2(0, 5));
+                                            index++;
+                                        }
+                                    } else {
+                                        ImGui::SetCursorPosX(45 + wOff);
+                                        ImVec2 bp = ImGui::GetCursorScreenPos();
+                                        if (ImGui::InvisibleButton("##backbtn", ImVec2(80, 25))) {
+                                            selectedNewsIndex = -1;
+                                        }
+                                        bool backHover = ImGui::IsItemHovered();
+                                        if (backHover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                                        
+                                        backHoverAnim = ImLerp(backHoverAnim, backHover ? 1.0f : 0.0f, ImGui::GetIO().DeltaTime * 12.0f);
+                                        
+                                        ImU32 bBg = IM_COL32(255, 255, 255, (int)((5 + 15 * backHoverAnim) * contentAlpha));
+                                        ImU32 bBorder = IM_COL32(255, 255, 255, (int)((20 + 30 * backHoverAnim) * contentAlpha));
+                                        ImGui::GetWindowDrawList()->AddRectFilled(bp, ImVec2(bp.x + 80, bp.y + 25), bBg, 4.0f);
+                                        ImGui::GetWindowDrawList()->AddRect(bp, ImVec2(bp.x + 80, bp.y + 25), bBorder, 4.0f);
+                                        
+                                        float textX = bp.x + 18.0f - (backHoverAnim * 5.0f);
+                                        ImGui::GetWindowDrawList()->AddText(ImVec2(textX, bp.y + 4), IM_COL32(255, 255, 255, (int)(255 * contentAlpha)), "< Back");
+                                        
+                                        ImGui::Dummy(ImVec2(0, 15));
+                                        
+                                        if (selectedNewsIndex >= 0 && selectedNewsIndex < g_NewsItems.size()) {
+                                            const auto& item = g_NewsItems[selectedNewsIndex];
+                                            ImGui::SetCursorPosX(45 + wOff);
+                                            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, (int)(255 * contentAlpha)));
+                                            ImGui::TextWrapped("%s", item.title.c_str());
+                                            ImGui::PopStyleColor();
+                                            
+                                            ImGui::SetCursorPosX(45 + wOff);
+                                            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, contentAlpha), "%s", item.date.c_str());
+                                            ImGui::Dummy(ImVec2(0, 15));
+                                            
+                                            ImGui::SetCursorPosX(45 + wOff);
+                                            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(180, 190, 200, (int)(255 * contentAlpha)));
+                                            
+                                            std::istringstream stream(item.content);
+                                            std::string line;
+                                            while (std::getline(stream, line)) {
+                                                float indent = 45 + wOff;
+                                                ImGui::SetCursorPosX(indent);
+                                                
+                                                if (line.empty()) { ImGui::Dummy(ImVec2(0, 5)); continue; }
+                                                
+                                                if (line.rfind("# ", 0) == 0) {
+                                                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, (int)(255 * contentAlpha)));
+                                                    ImGui::SetWindowFontScale(1.15f);
+                                                    ImGui::TextWrapped("%s", line.c_str() + 2);
+                                                    ImGui::SetWindowFontScale(1.0f);
+                                                    ImGui::PopStyleColor();
+                                                    ImGui::Dummy(ImVec2(0, 5));
+                                                    continue;
+                                                }
+                                                if (line.rfind("## ", 0) == 0) {
+                                                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(230, 230, 230, (int)(255 * contentAlpha)));
+                                                    ImGui::SetWindowFontScale(1.05f);
+                                                    ImGui::TextWrapped("%s", line.c_str() + 3);
+                                                    ImGui::SetWindowFontScale(1.0f);
+                                                    ImGui::PopStyleColor();
+                                                    ImGui::Dummy(ImVec2(0, 3));
+                                                    continue;
+                                                }
+                                                
+                                                if (line.rfind("- ", 0) == 0 || line.rfind("* ", 0) == 0) {
+                                                    indent += 12.0f;
+                                                    ImGui::SetCursorPosX(indent);
+                                                    line = "• " + line.substr(2);
+                                                }
+                                                
+                                                bool isQuote = false;
+                                                if (line.rfind("> ", 0) == 0) {
+                                                    isQuote = true;
+                                                    indent += 12.0f;
+                                                    ImGui::SetCursorPosX(indent);
+                                                    ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + 3, ImGui::GetCursorScreenPos().y + 14), IM_COL32(150, 150, 150, (int)(255 * contentAlpha)));
+                                                    indent += 8.0f;
+                                                    ImGui::SetCursorPosX(indent);
+                                                    line = line.substr(2);
+                                                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 160, 170, (int)(255 * contentAlpha)));
+                                                }
+
+                                                size_t pos = 0;
+                                                while (pos < line.length()) {
+                                                    size_t nextLink = line.find("[", pos);
+                                                    size_t nextBold = line.find("**", pos);
+                                                    
+                                                    size_t nextSpecial = (nextLink < nextBold) ? nextLink : nextBold;
+                                                    
+                                                    if (nextSpecial == std::string::npos) {
+                                                        std::string text = line.substr(pos);
+                                                        if (pos == 0) {
+                                                            ImGui::TextWrapped("%s", text.c_str());
+                                                        } else {
+                                                            ImGui::Text("%s", text.c_str());
+                                                        }
+                                                        break;
+                                                    }
+                                                    
+                                                    if (nextSpecial > pos) {
+                                                        std::string text = line.substr(pos, nextSpecial - pos);
+                                                        ImGui::Text("%s", text.c_str());
+                                                        ImGui::SameLine(0, 0);
+                                                    }
+                                                    
+                                                    if (nextSpecial == nextBold) {
+                                                        size_t boldEnd = line.find("**", nextBold + 2);
+                                                        if (boldEnd != std::string::npos) {
+                                                            std::string boldText = line.substr(nextBold + 2, boldEnd - nextBold - 2);
+                                                            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, (int)(255 * contentAlpha)));
+                                                            ImGui::Text("%s", boldText.c_str());
+                                                            ImGui::PopStyleColor();
+                                                            ImGui::SameLine(0, 0);
+                                                            pos = boldEnd + 2;
+                                                        } else {
+                                                            ImGui::Text("**"); ImGui::SameLine(0, 0);
+                                                            pos = nextBold + 2;
+                                                        }
+                                                    } else if (nextSpecial == nextLink) {
+                                                        size_t linkMid = line.find("](", nextLink);
+                                                        if (linkMid != std::string::npos) {
+                                                            size_t linkEnd = line.find(")", linkMid);
+                                                            if (linkEnd != std::string::npos) {
+                                                                std::string linkText = line.substr(nextLink + 1, linkMid - nextLink - 1);
+                                                                std::string linkUrl = line.substr(linkMid + 2, linkEnd - linkMid - 2);
+                                                                
+                                                                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(100, 180, 255, (int)(255 * contentAlpha)));
+                                                                ImGui::Text("%s", linkText.c_str());
+                                                                if (ImGui::IsItemHovered()) {
+                                                                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                                                                    if (ImGui::IsItemClicked()) ShellExecuteA(NULL, "open", linkUrl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                                                                    ImVec2 min = ImGui::GetItemRectMin();
+                                                                    ImVec2 max = ImGui::GetItemRectMax();
+                                                                    ImGui::GetWindowDrawList()->AddLine(ImVec2(min.x, max.y), ImVec2(max.x, max.y), IM_COL32(100, 180, 255, (int)(255 * contentAlpha)));
+                                                                }
+                                                                ImGui::PopStyleColor();
+                                                                ImGui::SameLine(0, 0);
+                                                                
+                                                                pos = linkEnd + 1;
+                                                            } else {
+                                                                ImGui::Text("["); ImGui::SameLine(0, 0); pos = nextLink + 1;
+                                                            }
+                                                        } else {
+                                                            ImGui::Text("["); ImGui::SameLine(0, 0); pos = nextLink + 1;
+                                                        }
+                                                    }
+                                                }
+                                                if (pos > 0) ImGui::NewLine();
+                                                
+                                                if (isQuote) ImGui::PopStyleColor();
+                                            }
+
+                                            ImGui::PopStyleColor();
+                                            ImGui::Dummy(ImVec2(0, 10));
+                                        }
+                                    }
+                                }
+                            } else if (overviewSubTab == 2) {
+                                auto DrawLink = [&](const char* title, const char* name, const char* url) {
+                                    ImGui::SetCursorPosX(45 + wOff);
+                                    ImGui::Text("%s", title);
+                                    ImGui::SetCursorPosX(45 + wOff);
+                                    
+                                    ImVec2 p = ImGui::GetCursorScreenPos();
+                                    float nameW = ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, name).x;
+                                    ImGui::InvisibleButton(name, ImVec2(nameW, 20));
+                                    bool hovered = ImGui::IsItemHovered();
+                                    if (hovered) {
+                                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                                        if (ImGui::IsItemClicked()) ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWNORMAL);
+                                    }
+                                    
+                                    ImU32 col = hovered ? IM_COL32(150, 200, 255, (int)(255 * contentAlpha)) : IM_COL32(100, 180, 255, (int)(255 * contentAlpha));
+                                    ImGui::GetWindowDrawList()->AddText(p, col, name);
+                                    if (hovered) ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x, p.y + 16), ImVec2(p.x + nameW, p.y + 16), col);
+                                    
+                                    ImGui::SameLine();
+                                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3);
+                                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, contentAlpha), "- %s", url);
+                                    ImGui::Dummy(ImVec2(0, 5));
+                                };
+                                
+                                DrawLink("Founder / Lead Developer:", "Yuzu", "https://github.com/yuzu-n1");
+                                DrawLink("Contributor:", "Nisesimadao", "https://github.com/nisesimadao");
+                            }
+                            
+                            ImGui::PopStyleColor();
+                        }
+                    }
 
                     if (showCombat) {
                         std::vector<const char*> matchedSettings_1;
@@ -3735,9 +4067,9 @@ if (g_ExpandAnims[2] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(2, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -3811,9 +4143,9 @@ if (g_ExpandAnims[7] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(7, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -3851,9 +4183,9 @@ if (g_ExpandAnims[5] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(5, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -3891,9 +4223,9 @@ if (g_ExpandAnims[6] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(6, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -3930,9 +4262,9 @@ if (g_ExpandAnims[8] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(8, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -3990,9 +4322,9 @@ if (g_ExpandAnims[1] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(1, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4031,9 +4363,9 @@ if (g_ExpandAnims[4] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(4, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4127,9 +4459,9 @@ if (g_ExpandAnims[10] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(10, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4174,9 +4506,9 @@ if (g_ExpandAnims[0] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(0, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4222,9 +4554,9 @@ if (g_ExpandAnims[8] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(8, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4265,9 +4597,9 @@ if (g_ExpandAnims[9] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(9, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4309,9 +4641,9 @@ if (g_ExpandAnims[3] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(3, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4349,9 +4681,9 @@ if (g_ExpandAnims[13] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(13, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4429,9 +4761,9 @@ if (g_ExpandAnims[11] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(11, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);
@@ -4468,9 +4800,9 @@ if (g_ExpandAnims[12] > 0.01f) {
                             float savedY = ImGui::GetCursorPosY();
                               float slideOffset = (1.0f - (ea / (contentAlpha > 0.01f ? contentAlpha : 1.0f))) * 25.0f;
                               float startX = (220.0f > ImGui::GetWindowSize().x - 320.0f ? 220.0f : ImGui::GetWindowSize().x - 320.0f);
-                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX - slideOffset, ImGui::GetWindowPos().y + 85.0f);
+                              ImVec2 bgTopLeft = ImVec2(ImGui::GetWindowPos().x + startX + slideOffset, ImGui::GetWindowPos().y + 85.0f);
                               // Background drawn globally to prevent dark accumulation
-                              ImGui::SetCursorPos(ImVec2(startX - slideOffset, 85.0f));
+                              ImGui::SetCursorPos(ImVec2(startX + slideOffset, 85.0f));
                               ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ea);
                               ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
                               BeginSmoothScrollChild(12, ImVec2(0, 0), false, ImGuiWindowFlags_NoBackground);

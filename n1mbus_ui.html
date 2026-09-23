@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>N1mbus UI Recreation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: url('https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/minecraft.png') no-repeat center center fixed;
+            background-color: #1a2430;
+            background-size: cover;
+            font-family: 'Outfit', sans-serif;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+        }
+
+        .n1mbus-gui {
+            width: 950px;
+            height: 550px;
+            display: flex;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 15px 50px rgba(0, 0, 0, 0.7);
+            transform: scale(1.2);
+            transform-origin: center;
+        }
+
+        /* --- Left Sidebar --- */
+        .sidebar {
+            width: 220px;
+            background: #080e12;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            z-index: 20;
+        }
+
+        .logo-container {
+            padding: 25px 25px 20px 20px;
+        }
+
+        .logo {
+            width: 170px;
+            height: auto;
+            display: block;
+        }
+
+        .nav-items {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            padding: 0;
+            margin-top: 25px;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 0 0 0 40px;
+            color: #8b949e;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            position: relative;
+            transition: color 0.2s;
+        }
+        
+        .nav-item:hover {
+            color: #fff;
+        }
+
+        .nav-item i {
+            width: 32px;
+            font-size: 14px;
+            color: #60a5fa;
+        }
+
+        .nav-item.active {
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .nav-item::before {
+            content: '';
+            position: absolute;
+            left: 8px;
+            top: 50%;
+            transform: translateY(-50%) scaleY(0);
+            height: 22px;
+            width: 4px;
+            background: #fff;
+            border-radius: 4px;
+            opacity: 0;
+            transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s;
+        }
+
+        .nav-item.active::before {
+            transform: translateY(-50%) scaleY(1);
+            opacity: 1;
+        }
+
+        .user-profile {
+            margin-top: auto;
+            padding: 25px 25px 30px 25px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .avatar {
+            width: 34px;
+            height: 34px;
+            background: url('https://mc-heads.net/avatar/Steve/34') no-repeat center center;
+            background-size: cover;
+            border-radius: 6px;
+        }
+
+        .user-info {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            line-height: 1.2;
+        }
+
+        .user-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .user-role {
+            font-size: 11px;
+            font-weight: 500;
+            color: #5c728a;
+        }
+
+        /* --- Content Area (Middle + Right) --- */
+        .content-area {
+            flex: 1;
+            display: flex;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .content-bg {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(15, 20, 25, 0.62);
+            backdrop-filter: blur(12px);
+            z-index: 1;
+            pointer-events: none;
+        }
+
+        .header-bg {
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 85px;
+            background: linear-gradient(to bottom, rgba(8, 14, 18, 0.96) 0%, rgba(8, 14, 18, 0.96) 60px, rgba(8, 14, 18, 0) 85px);
+            z-index: 10;
+            pointer-events: none;
+            border-top-right-radius: 10px;
+        }
+
+        .sidebar-shadow {
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: 35px;
+            background: linear-gradient(to right, rgba(8, 14, 18, 0.78) 0%, rgba(8, 14, 18, 0) 100%);
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        /* Search Bar */
+        .search-container {
+            position: absolute;
+            top: 38px;
+            left: 45px;
+            width: 340px;
+            z-index: 11;
+        }
+
+        .search-input {
+            width: 100%;
+            background: rgba(15, 20, 25, 0.8);
+            border: none;
+            border-radius: 6px;
+            padding: 8px 12px 8px 32px;
+            color: #c8c8c8;
+            font-family: 'Outfit', sans-serif;
+            font-size: 13px;
+            outline: none;
+            box-sizing: border-box;
+        }
+
+        .search-input::placeholder {
+            color: #78828c;
+        }
+
+        .search-icon {
+            position: absolute;
+            top: 50%;
+            left: 12px;
+            transform: translateY(-50%);
+            font-size: 11px;
+            color: #78828c;
+        }
+
+        /* --- Middle Panel (Module List) --- */
+        .module-panel {
+            width: 410px; /* Fixed width to prevent expanding into right panel */
+            flex: none;
+            display: flex;
+            flex-direction: column;
+            z-index: 5;
+            padding-top: 110px;
+        }
+
+        .panel-header-container {
+            padding: 0 25px 20px 45px;
+            position: relative;
+        }
+
+        .panel-header {
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            color: #598099;
+            text-transform: uppercase;
+        }
+
+        .panel-header-line {
+            position: absolute;
+            bottom: 14px;
+            left: 45px;
+            width: 60px;
+            height: 1px;
+            background: rgba(50, 130, 190, 0.4);
+        }
+
+        .module-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0 15px 0 35px;
+        }
+
+        .module-list::-webkit-scrollbar {
+            display: none;
+        }
+
+        .module-item {
+            position: relative;
+            padding: 10px 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            border-radius: 6px;
+            margin-bottom: 2px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+
+        .module-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .module-item::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 50%;
+            transform: translateY(-50%) scaleY(0);
+            height: 18px;
+            width: 3px;
+            background: #fff;
+            border-radius: 4px;
+            opacity: 0;
+            transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s;
+        }
+
+        .module-item.expanded::before {
+            transform: translateY(-50%) scaleY(1);
+            opacity: 1;
+        }
+
+        .module-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .module-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .module-bind {
+            font-size: 11px;
+            font-weight: 500;
+            color: #6c7682;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-left: 18px;
+        }
+
+        .toggle {
+            width: 34px;
+            height: 18px;
+            background: #232a35;
+            border-radius: 10px;
+            position: relative;
+            margin-top: 2px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            flex-shrink: 0;
+        }
+
+        .toggle.on {
+            background: #2d78b4;
+        }
+
+        .toggle::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 14px;
+            height: 14px;
+            background: #f5f8fc;
+            border-radius: 50%;
+            transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+
+        .toggle.on::after {
+            transform: translateX(16px);
+        }
+
+        /* --- Right Panel (Settings) --- */
+        .settings-container {
+            position: absolute;
+            top: 0; right: 0; bottom: 0;
+            width: 320px;
+            z-index: 5;
+            transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s;
+        }
+        
+        .settings-container:not(.open) {
+            transform: translateX(40px);
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .settings-bg {
+            position: absolute;
+            top: 0; right: 0; bottom: 0; left: 0;
+            background: rgba(10, 14, 18, 0.62);
+            border-left: 1px solid rgba(255, 255, 255, 0.12);
+            z-index: -1;
+        }
+
+        .settings-panel {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            padding: 110px 35px 35px 35px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 22px;
+            overflow-y: auto;
+        }
+
+        .settings-panel::-webkit-scrollbar {
+            width: 6px;
+        }
+        .settings-panel::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .settings-panel::-webkit-scrollbar-thumb {
+            background: #2c3643;
+            border-radius: 4px;
+        }
+
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .setting-label {
+            font-size: 13px;
+            font-weight: 500;
+            color: #e6ebf0;
+        }
+
+        .dropdown {
+            font-size: 12px;
+            font-weight: 500;
+            color: #d1d5db;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+        
+        .dropdown i {
+            font-size: 9px;
+            color: #8b949e;
+        }
+
+        /* Custom Slider */
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .slider-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            font-weight: 500;
+            color: #e6ebf0;
+        }
+
+        .slider-value {
+            color: #8b949e;
+            font-size: 12px;
+        }
+
+        .slider-track {
+            height: 4px;
+            background: #19232d;
+            border-radius: 2px;
+            position: relative;
+            cursor: pointer;
+        }
+
+        .slider-fill {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            background: #3282be;
+            border-radius: 2px;
+            pointer-events: none;
+        }
+
+        .slider-thumb {
+            position: absolute;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            width: 12px;
+            height: 12px;
+            background: #fff;
+            border-radius: 50%;
+            box-shadow: 0 0 3px rgba(0,0,0,0.5);
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        
+        .slider-thumb:hover {
+            transform: translate(-50%, -50%) scale(1.2);
+        }
+
+        .slider-fill.range {
+            left: 30%;
+            width: 40%;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="n1mbus-gui">
+        
+        <!-- Left Sidebar -->
+        <div class="sidebar">
+            <div class="logo-container">
+                <img class="logo" src="file:///c:/Users/mikan/.gemini/antigravity/scratch/n1mbus_preview/assets/nimbus-banner-1920x721.png" alt="NIMBUS">
+            </div>
+            
+            <div class="nav-items">
+                <div class="nav-item active">
+                    <i class="fa-solid fa-shield"></i> Combat
+                </div>
+                <div class="nav-item">
+                    <i class="fa-solid fa-person-running"></i> Movement
+                </div>
+                <div class="nav-item">
+                    <i class="fa-solid fa-eye"></i> Render
+                </div>
+                <div class="nav-item">
+                    <i class="fa-solid fa-gear"></i> Utility
+                </div>
+                <div class="nav-item">
+                    <i class="fa-solid fa-wifi"></i> Network
+                </div>
+                <div class="nav-item">
+                    <i class="fa-solid fa-puzzle-piece"></i> Plugins
+                </div>
+            </div>
+
+            <div class="user-profile">
+                <div class="avatar"></div>
+                <div class="user-info">
+                    <span class="user-name">Steve</span>
+                    <span class="user-role">Premium User</span>
+                </div>
+                <img src="file:///c:/Users/mikan/.gemini/antigravity/scratch/n1mbus_preview/assets/palette.png" style="width: 15px; opacity: 0.5;">
+            </div>
+        </div>
+
+        <!-- Content Area -->
+        <div class="content-area">
+            
+            <!-- Global Backdrops -->
+            <div class="content-bg"></div>
+            <div class="header-bg"></div>
+            <div class="sidebar-shadow"></div>
+            
+            <!-- Search Bar -->
+            <div class="search-container">
+                <i class="fa-solid fa-magnifying-glass search-icon"></i>
+                <input type="text" class="search-input" placeholder="Search modules...">
+            </div>
+            
+            <!-- Middle Panel -->
+            <div class="module-panel">
+                <div class="panel-header-container">
+                    <div class="panel-header" id="panel-header-title">COMBAT</div>
+                    <div class="panel-header-line"></div>
+                </div>
+                
+                <div class="module-list" id="module-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <!-- Right Panel (Settings) -->
+            <div id="settings-container" class="settings-container open">
+                <div class="settings-bg"></div>
+                <div class="settings-panel" id="settings-panel-content">
+                    <!-- Populated dynamically by JS -->
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const tabData = {
+            'Combat': [
+                {
+                    name: 'KillAura', bind: 'R', active: false,
+                    settings: [
+                        { type: 'dropdown', label: 'Mode', value: 'Multi' },
+                        { type: 'dropdown', label: 'Priority', value: 'Distance' },
+                        { type: 'slider', label: 'Reach', value: '4.5', suffix: ' blocks', pct: 60 },
+                        { type: 'range', label: 'CPS', value: '10 - 13', pct1: 30, pct2: 70 },
+                        { type: 'slider', label: 'FOV', value: '360', suffix: ' deg', pct: 100 },
+                        { type: 'slider', label: 'Aim Speed', value: '10.0', suffix: '', pct: 100 },
+                        { type: 'toggle', label: 'Teams', active: false },
+                        { type: 'toggle', label: 'Silent Rotate', active: false },
+                        { type: 'toggle', label: 'Show Target', active: true }
+                    ]
+                },
+                {
+                    name: 'Velocity', bind: 'None', active: false,
+                    settings: [
+                        { type: 'slider', label: 'Horizontal', value: '0', suffix: '%', pct: 0 },
+                        { type: 'slider', label: 'Vertical', value: '0', suffix: '%', pct: 0 },
+                        { type: 'slider', label: 'Chance', value: '100', suffix: '%', pct: 100 },
+                        { type: 'toggle', label: 'Only on ground', active: false }
+                    ]
+                },
+                { name: 'AimAssist', bind: 'None', active: false, settings: [
+                    { type: 'slider', label: 'Speed', value: '5.0', suffix: '', pct: 50 },
+                    { type: 'slider', label: 'FOV', value: '180', suffix: ' deg', pct: 50 },
+                    { type: 'toggle', label: 'Click Aim', active: true }
+                ]},
+                { name: 'AutoClicker', bind: 'None', active: false, settings: [
+                    { type: 'range', label: 'CPS', value: '12 - 15', pct1: 40, pct2: 80 },
+                    { type: 'toggle', label: 'Jitter', active: true }
+                ]},
+                { name: 'TriggerBot', bind: 'None', active: false, settings: [] }
+            ],
+            'Movement': [
+                { name: 'Sprint', bind: 'V', active: true, settings: [
+                    { type: 'toggle', label: 'Keep Sprint', active: true },
+                    { type: 'toggle', label: 'Omni Sprint', active: false }
+                ]},
+                { name: 'Step', bind: 'None', active: false, settings: [
+                    { type: 'slider', label: 'Height', value: '1.5', suffix: ' blocks', pct: 50 },
+                    { type: 'toggle', label: 'Reverse', active: false }
+                ]},
+                { name: 'Flight', bind: 'F', active: false, settings: [
+                    { type: 'dropdown', label: 'Mode', value: 'Vanilla' },
+                    { type: 'slider', label: 'Speed', value: '2.0', suffix: '', pct: 40 }
+                ]},
+                { name: 'Speed', bind: 'None', active: false, settings: [
+                    { type: 'dropdown', label: 'Mode', value: 'Strafe' },
+                    { type: 'toggle', label: 'Use Friction', active: true }
+                ]}
+            ],
+            'Render': [
+                { name: 'ESP', bind: 'None', active: true, settings: [
+                    { type: 'dropdown', label: 'Mode', value: '2D' },
+                    { type: 'toggle', label: 'Outline', active: true },
+                    { type: 'toggle', label: 'Health Bar', active: true },
+                    { type: 'toggle', label: 'Armor Bar', active: false }
+                ]},
+                { name: 'Fullbright', bind: 'None', active: true, settings: [
+                    { type: 'dropdown', label: 'Mode', value: 'Gamma' }
+                ]},
+                { name: 'TargetHUD', bind: 'None', active: false, settings: [
+                    { type: 'dropdown', label: 'Theme', value: 'N1mbus' },
+                    { type: 'toggle', label: 'Show Ping', active: true }
+                ]}
+            ],
+            'Utility': [
+                { name: 'AutoTool', bind: 'None', active: false, settings: [
+                    { type: 'toggle', label: 'Silent', active: true }
+                ]},
+                { name: 'AntiBot', bind: 'None', active: false, settings: [
+                    { type: 'dropdown', label: 'Mode', value: 'Advanced' }
+                ]},
+                { name: 'Spammer', bind: 'None', active: false, settings: [
+                    { type: 'slider', label: 'Delay', value: '1000', suffix: 'ms', pct: 50 }
+                ]}
+            ],
+            'Network': [
+                { name: 'FakeLag', bind: 'None', active: false, settings: [
+                    { type: 'slider', label: 'Pulse', value: '200', suffix: 'ms', pct: 20 }
+                ]},
+                { name: 'PingSpoof', bind: 'None', active: false, settings: [
+                    { type: 'slider', label: 'Ping', value: '150', suffix: 'ms', pct: 30 }
+                ]}
+            ],
+            'Plugins': []
+        };
+
+        let currentCategory = 'Combat';
+        let expandedModule = 'KillAura';
+
+        function init() {
+            // Setup tab clicks
+            document.querySelectorAll('.nav-item').forEach(item => {
+                item.addEventListener('click', (e) => {
+                    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+                    e.currentTarget.classList.add('active');
+                    currentCategory = e.currentTarget.innerText.trim();
+                    document.getElementById('panel-header-title').innerText = currentCategory.toUpperCase();
+                    closeSettings();
+                    renderModules();
+                });
+            });
+
+            renderModules();
+            renderSettings('KillAura');
+        }
+
+        function renderModules() {
+            const list = document.getElementById('module-list');
+            list.innerHTML = '';
+            const mods = tabData[currentCategory] || [];
+            
+            if (mods.length === 0) {
+                list.innerHTML = '<div style="padding: 20px; color: #6c7682; font-size: 13px;">No modules</div>';
+                return;
+            }
+
+            mods.forEach(mod => {
+                const isExpanded = (mod.name === expandedModule);
+                const item = document.createElement('div');
+                item.className = 'module-item' + (isExpanded ? ' expanded' : '');
+                item.onclick = () => toggleSettings(mod.name);
+                
+                // Info area
+                const info = document.createElement('div');
+                info.className = 'module-info';
+                
+                const title = document.createElement('div');
+                title.className = 'module-title';
+                title.innerHTML = mod.name;
+                
+                const bind = document.createElement('div');
+                bind.className = 'module-bind';
+                bind.innerHTML = `Bind: ${mod.bind} <img src="file:///c:/Users/mikan/.gemini/antigravity/scratch/n1mbus_preview/assets/edit.png" style="width: 10px; opacity: 0.6; margin-left: 2px;">`;
+                
+                info.appendChild(title);
+                info.appendChild(bind);
+                
+                // Toggle area
+                const toggle = document.createElement('div');
+                toggle.className = 'toggle' + (mod.active ? ' on' : '');
+                toggle.onclick = (e) => {
+                    e.stopPropagation();
+                    mod.active = !mod.active;
+                    toggle.classList.toggle('on');
+                };
+                
+                item.appendChild(info);
+                item.appendChild(toggle);
+                list.appendChild(item);
+            });
+        }
+
+        function renderSettings(modName) {
+            const container = document.getElementById('settings-panel-content');
+            container.innerHTML = '';
+            
+            const mods = tabData[currentCategory] || [];
+            const mod = mods.find(m => m.name === modName);
+            
+            if (!mod || !mod.settings || mod.settings.length === 0) {
+                container.innerHTML = '<div style="color: #6c7682; font-size: 13px; text-align: center; margin-top: 20px;">No settings available.</div>';
+                return;
+            }
+
+            mod.settings.forEach(set => {
+                if (set.type === 'dropdown') {
+                    container.innerHTML += `
+                        <div class="setting-row">
+                            <span class="setting-label">${set.label}</span>
+                            <div class="dropdown">${set.value} <i class="fa-solid fa-caret-down"></i></div>
+                        </div>
+                    `;
+                } else if (set.type === 'toggle') {
+                    container.innerHTML += `
+                        <div class="setting-row" ${set.label === 'Teams' ? 'style="margin-top: 5px;"' : ''}>
+                            <span class="setting-label">${set.label}</span>
+                            <div class="toggle ${set.active ? 'on' : ''}" onclick="this.classList.toggle('on')"></div>
+                        </div>
+                    `;
+                } else if (set.type === 'slider') {
+                    container.innerHTML += `
+                        <div class="slider-container">
+                            <div class="slider-header">
+                                <span>${set.label}</span>
+                                <span class="slider-value">${set.value}${set.suffix || ''}</span>
+                            </div>
+                            <div class="slider-track" onclick="moveSlider(event, this, false)">
+                                <div class="slider-fill" style="width: ${set.pct}%;"></div>
+                                <div class="slider-thumb" style="left: ${set.pct}%;"></div>
+                            </div>
+                        </div>
+                    `;
+                } else if (set.type === 'range') {
+                    container.innerHTML += `
+                        <div class="slider-container">
+                            <div class="slider-header">
+                                <span>${set.label}</span>
+                                <span class="slider-value">${set.value}</span>
+                            </div>
+                            <div class="slider-track" onclick="moveSlider(event, this, true)">
+                                <div class="slider-fill range" style="left: ${set.pct1}%; width: ${set.pct2 - set.pct1}%;"></div>
+                                <div class="slider-thumb" style="left: ${set.pct1}%;"></div>
+                                <div class="slider-thumb" style="left: ${set.pct2}%;"></div>
+                            </div>
+                        </div>
+                    `;
+                }
+            });
+        }
+
+        window.moveSlider = function(e, track, isRange) {
+            if (isRange) return; // Skip updating range slider logic for simplicity
+            const rect = track.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+            const fill = track.querySelector('.slider-fill');
+            const thumb = track.querySelector('.slider-thumb');
+            if (fill) fill.style.width = pct + '%';
+            if (thumb) thumb.style.left = pct + '%';
+        };
+
+        function toggleSettings(modName) {
+            if (expandedModule === modName) {
+                closeSettings();
+            } else {
+                expandedModule = modName;
+                renderSettings(modName);
+                openSettings();
+            }
+        }
+
+        function openSettings() {
+            document.getElementById('settings-container').classList.add('open');
+            renderModules();
+        }
+
+        function closeSettings() {
+            expandedModule = null;
+            document.getElementById('settings-container').classList.remove('open');
+            renderModules();
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
