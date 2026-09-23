@@ -100,8 +100,8 @@ static std::map<std::string, ToggleState> g_PluginToggles;
 static ToggleState* GetModToggle(const std::string& name);
 bool g_ExpandStates[15] = { false };
 float g_ExpandAnims[15] = { 0.0f };
-bool g_ComboOpen[15] = {};
-float g_ComboOpenAnim[15] = {};
+bool g_ComboOpen[8] = {};
+float g_ComboOpenAnim[8] = {};
 // [0]=KillAura reach  [1]=Fly speed  [2]=Speed mult  [3]=HUD fade
 // [4]=HUD scale  [5]=HUD X  [6]=HUD Y  [7]=AimAssist speed [8]=AimAssist FOV
 // [9]=AutoClicker Min CPS [10]=AutoClicker Max CPS
@@ -432,98 +432,6 @@ static void DrawHighlightedText(ImDrawList* dl, ImVec2 pos, ImU32 color, ImU32 h
     DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), pos, color, highlightColor, text, text_end, query);
 }
 
-
-static bool StyledMultiCombo(const char* label, bool* states, const char* const items[], int count, float alphaMultiplier, int comboIdx) {
-    ImGui::PushID(label);
-    ImVec2 startPos = ImGui::GetCursorScreenPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    int baseA = (int)(255 * alphaMultiplier);
-    float rowW = 250.0f;
-    float rowH = 22.0f;
-
-    ImGui::InvisibleButton("##combobtn", ImVec2(rowW, rowH));
-    bool hovered = ImGui::IsItemHovered();
-    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    if (ImGui::IsItemClicked()) g_ComboOpen[comboIdx] = !g_ComboOpen[comboIdx];
-
-    ImU32 textCol = hovered ? IM_COL32(230, 235, 240, baseA) : IM_COL32(200, 210, 210, baseA);
-    DrawHighlightedText(dl, ImVec2(startPos.x, startPos.y + 3), textCol, IM_COL32(100, 180, 255, baseA), label, nullptr, g_SearchBuffer);
-
-    std::string selStr = "";
-    int selCount = 0;
-    for(int i=0; i<count; i++) {
-        if(states[i]) {
-            if(selCount > 0) selStr += ", ";
-            selStr += items[i];
-            selCount++;
-        }
-    }
-    if(selCount == 0) selStr = "None";
-    if(selStr.length() > 20) selStr = std::to_string(selCount) + " selected";
-
-    ImVec2 selSize = ImGui::CalcTextSize(selStr.c_str());
-    dl->AddText(ImVec2(startPos.x + rowW - selSize.x - 20, startPos.y + 3), IM_COL32(140, 155, 170, baseA), selStr.c_str());
-
-    float ax = startPos.x + rowW - 8, ay = startPos.y + 11;
-    g_ComboOpenAnim[comboIdx] = Lerp(g_ComboOpenAnim[comboIdx], g_ComboOpen[comboIdx] ? 1.0f : 0.0f, ImGui::GetIO().DeltaTime * 14.0f);
-    float arrowAng = g_ComboOpenAnim[comboIdx];
-    float angle_c = arrowAng * 3.14159265359f; 
-    float s_c = sinf(angle_c), c_c = cosf(angle_c);
-    
-    ImVec2 cp1(-3.5f, -1.5f); ImVec2 cp2( 0.0f,  2.0f); ImVec2 cp3( 3.5f, -1.5f);
-    ImVec2 cr1(cp1.x * c_c - cp1.y * s_c + ax, cp1.x * s_c + cp1.y * c_c + ay);
-    ImVec2 cr2(cp2.x * c_c - cp2.y * s_c + ax, cp2.x * s_c + cp2.y * c_c + ay);
-    ImVec2 cr3(cp3.x * c_c - cp3.y * s_c + ax, cp3.x * s_c + cp3.y * c_c + ay);
-    
-    dl->AddLine(cr1, cr2, IM_COL32(150, 165, 180, baseA), 2.0f);
-    dl->AddLine(cr2, cr3, IM_COL32(150, 165, 180, baseA), 2.0f);
-
-    bool changed = false;
-    float itemH = 22.0f;
-    float totalDropH = count * itemH + 8.0f;
-    float currentDropH = totalDropH * EaseOutCubic(g_ComboOpenAnim[comboIdx]);
-
-    if (currentDropH > 0.01f) {
-        float dropY = startPos.y + rowH;
-        dl->PushClipRect(ImVec2(startPos.x, dropY), ImVec2(startPos.x + rowW, dropY + currentDropH), true);
-        dl->AddRectFilled(ImVec2(startPos.x + 8, dropY), ImVec2(startPos.x + rowW - 8, dropY + currentDropH - 4), IM_COL32(15, 20, 25, (int)(100 * alphaMultiplier)), 6.0f);
-        
-        for (int i = 0; i < count; i++) {
-            float itemY = dropY + 4.0f + i * itemH;
-            ImGui::SetCursorScreenPos(ImVec2(startPos.x + 10, itemY));
-            ImGui::PushID(i);
-            ImGui::InvisibleButton("##item", ImVec2(rowW - 20, itemH));
-            bool itemHov = ImGui::IsItemHovered();
-            if (itemHov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-
-            if (ImGui::IsItemClicked()) {
-                states[i] = !states[i];
-                changed = true;
-                SaveConfig();
-            }
-
-            ImU32 itCol = states[i] ? IM_COL32(100, 180, 255, baseA) : (itemHov ? IM_COL32(230,230,230,baseA) : IM_COL32(170,170,170,baseA));
-            dl->AddText(ImVec2(startPos.x + 35, itemY + 3), itCol, items[i]);
-            
-            // Draw checkbox
-            float cbR = 6.0f;
-            float cbX = startPos.x + 20;
-            float cbY = itemY + itemH * 0.5f;
-            dl->AddRectFilled(ImVec2(cbX - cbR, cbY - cbR), ImVec2(cbX + cbR, cbY + cbR), IM_COL32(30, 35, 40, baseA), 2.0f);
-            if (states[i]) {
-                dl->AddRectFilled(ImVec2(cbX - cbR+2, cbY - cbR+2), ImVec2(cbX + cbR-2, cbY + cbR-2), IM_COL32(100, 180, 255, baseA), 1.0f);
-            }
-            ImGui::PopID();
-        }
-        dl->PopClipRect();
-        ImGui::SetCursorScreenPos(ImVec2(startPos.x, dropY + currentDropH));
-    } else {
-        ImGui::SetCursorScreenPos(ImVec2(startPos.x, startPos.y + rowH));
-    }
-    ImGui::PopID();
-    return changed;
-}
-
 static bool AnimatedToggle(const char* label, ToggleState& state, float dt, float alphaMultiplier) {
     ImGui::PushID(label);
     float fullW = ImGui::GetContentRegionAvail().x;
@@ -544,52 +452,9 @@ static bool AnimatedToggle(const char* label, ToggleState& state, float dt, floa
     ImDrawList* dl = ImGui::GetWindowDrawList();
     int baseA = (int)(255 * alphaMultiplier);
     
-                ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
-      const char* labelEnd = strstr(label, "##");
-      
-      std::string cleanLabel = label;
-      if (labelEnd) cleanLabel = std::string(label, labelEnd - label);
-      
-      bool hasBugged = false;
-      auto bugPos = cleanLabel.find(" [Bugged]");
-      if (bugPos != std::string::npos) {
-          hasBugged = true;
-          cleanLabel.erase(bugPos);
-      }
-      
-      bool hasUnsafe = false;
-      auto unsafePos = cleanLabel.find(" [Unsafe]");
-      if (unsafePos != std::string::npos) {
-          hasUnsafe = true;
-          cleanLabel.erase(unsafePos);
-      }
-
-      DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x + 16, pos.y + 2), textCol, IM_COL32(100, 180, 255, baseA), cleanLabel.c_str(), nullptr, g_SearchBuffer);
-
-      float currentTagX = pos.x + 16 + ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, cleanLabel.c_str()).x + 8;
-      float tagY = pos.y + 3;
-
-      if (hasBugged) {
-          float tagW = 38.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(240, 200, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "BUG").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(0, 0, 0, baseA), "BUG");
-          currentTagX += tagW + 4;
-      }
-
-      if (hasUnsafe) {
-          float tagW = 54.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(220, 50, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "UNSAFE").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(255, 255, 255, baseA), "UNSAFE");
-          currentTagX += tagW + 4;
-      }
+    ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
+    const char* labelEnd = strstr(label, "##");
+    DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x, pos.y + 2), textCol, IM_COL32(100, 180, 255, baseA), label, labelEnd, g_SearchBuffer);
     
     float toggleX = pos.x + fullW - toggleW;
     float r = toggleH * 0.5f;
@@ -633,52 +498,9 @@ static bool AnimatedModuleToggle(const char* label, Module* mod, float dt, float
     state.anim = Lerp(state.anim, state.value ? 1.0f : 0.0f, dt * 14.0f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     int baseA = (int)(255 * alphaMultiplier);
-                ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
-      const char* labelEnd = strstr(label, "##");
-      
-      std::string cleanLabel = label;
-      if (labelEnd) cleanLabel = std::string(label, labelEnd - label);
-      
-      bool hasBugged = false;
-      auto bugPos = cleanLabel.find(" [Bugged]");
-      if (bugPos != std::string::npos) {
-          hasBugged = true;
-          cleanLabel.erase(bugPos);
-      }
-      
-      bool hasUnsafe = false;
-      auto unsafePos = cleanLabel.find(" [Unsafe]");
-      if (unsafePos != std::string::npos) {
-          hasUnsafe = true;
-          cleanLabel.erase(unsafePos);
-      }
-
-      DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x + 16, pos.y + 2), textCol, IM_COL32(100, 180, 255, baseA), cleanLabel.c_str(), nullptr, g_SearchBuffer);
-
-      float currentTagX = pos.x + 16 + ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, cleanLabel.c_str()).x + 8;
-      float tagY = pos.y + 3;
-
-      if (hasBugged) {
-          float tagW = 38.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(240, 200, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "BUG").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(0, 0, 0, baseA), "BUG");
-          currentTagX += tagW + 4;
-      }
-
-      if (hasUnsafe) {
-          float tagW = 54.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(220, 50, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "UNSAFE").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(255, 255, 255, baseA), "UNSAFE");
-          currentTagX += tagW + 4;
-      }
+    ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
+    const char* labelEnd = strstr(label, "##");
+    DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x, pos.y + 2), textCol, IM_COL32(100, 180, 255, baseA), label, labelEnd, g_SearchBuffer);
     float toggleX = pos.x + fullW - toggleW;
     float r = toggleH * 0.5f;
     ImU32 trackCol = IM_COL32((int)Lerp(35,45,state.anim), (int)Lerp(45,120,state.anim), (int)Lerp(55,180,state.anim), baseA);
@@ -746,52 +568,9 @@ static bool AnimatedExpandableToggle(const char* label, ToggleState& state, floa
     dl->AddLine(r1, r2, arrowCol, 2.0f);
     dl->AddLine(r2, r3, arrowCol, 2.0f);
 
-                ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
-      const char* labelEnd = strstr(label, "##");
-      
-      std::string cleanLabel = label;
-      if (labelEnd) cleanLabel = std::string(label, labelEnd - label);
-      
-      bool hasBugged = false;
-      auto bugPos = cleanLabel.find(" [Bugged]");
-      if (bugPos != std::string::npos) {
-          hasBugged = true;
-          cleanLabel.erase(bugPos);
-      }
-      
-      bool hasUnsafe = false;
-      auto unsafePos = cleanLabel.find(" [Unsafe]");
-      if (unsafePos != std::string::npos) {
-          hasUnsafe = true;
-          cleanLabel.erase(unsafePos);
-      }
-
-      DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x + 16, pos.y + 2), textCol, IM_COL32(100, 180, 255, baseA), cleanLabel.c_str(), nullptr, g_SearchBuffer);
-
-      float currentTagX = pos.x + 16 + ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, cleanLabel.c_str()).x + 8;
-      float tagY = pos.y + 3;
-
-      if (hasBugged) {
-          float tagW = 38.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(240, 200, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "BUG").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(0, 0, 0, baseA), "BUG");
-          currentTagX += tagW + 4;
-      }
-
-      if (hasUnsafe) {
-          float tagW = 54.0f;
-          float tagH = 14.0f;
-          dl->AddRectFilled(ImVec2(currentTagX, tagY), ImVec2(currentTagX + tagW, tagY + tagH), IM_COL32(220, 50, 50, baseA), tagH * 0.5f);
-          ImFont* font = ImGui::GetFont();
-          float s = ImGui::GetFontSize() * 0.75f;
-          float bw = font->CalcTextSizeA(s, FLT_MAX, 0.0f, "UNSAFE").x;
-          dl->AddText(font, s, ImVec2(currentTagX + (tagW - bw) * 0.5f, tagY + 1.0f), IM_COL32(255, 255, 255, baseA), "UNSAFE");
-          currentTagX += tagW + 4;
-      }
+    ImU32 textCol = hovered ? IM_COL32(230,235,240,baseA) : IM_COL32(200,205,210,baseA);
+    const char* labelEnd = strstr(label, "##");
+    DrawHighlightedText(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(pos.x + 16, pos.y + 2), textCol, IM_COL32(100, 180, 255, baseA), label, labelEnd, g_SearchBuffer);
     
     float r = toggleH * 0.5f;
     ImU32 trackCol = IM_COL32((int)Lerp(35,45,state.anim), (int)Lerp(45,120,state.anim), (int)Lerp(55,180,state.anim), baseA);
@@ -2766,9 +2545,10 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
 
         if (inWorld || g_ShowMenu) {
             ImGui::SetNextWindowPos(ImVec2(20, 20));
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.08f, 0.10f, 0.88f));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-            if (ImGui::Begin("Watermark", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground)) {
+            if (ImGui::Begin("Watermark", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.95f, 1.0f), "N I M B U S");
                 RenderToastUI(io.DisplaySize.x, io.DisplaySize.y, dt);
             }
             ImGui::End(); ImGui::PopStyleVar(); ImGui::PopStyleColor();
@@ -2853,11 +2633,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             float startX = io.DisplaySize.x * 0.5f;
             float startY = io.DisplaySize.y * 0.5f;
             
-            float scaleX = io.DisplaySize.x / 1920.0f;
-            float scaleY = io.DisplaySize.y / 1080.0f;
-            
-            float targetCenterX = startX + (g_SliderVals[5] * scaleX);
-            float targetCenterY = startY + (g_SliderVals[6] * scaleY);
+            float targetCenterX = startX + g_SliderVals[5];
+            float targetCenterY = startY + g_SliderVals[6];
             
             if (targetCenterX - width * 0.5f < 0) targetCenterX = width * 0.5f;
             if (targetCenterX + width * 0.5f > io.DisplaySize.x) targetCenterX = io.DisplaySize.x - width * 0.5f;
@@ -2882,9 +2659,10 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             
             if (g_HudEditorMode) {
                 if (ImGui::IsWindowFocused() && ImGui::IsMouseDragging(0) && !thDragging) {
-                    g_SliderVals[5] += ImGui::GetIO().MouseDelta.x / scaleX;
-                    g_SliderVals[6] += ImGui::GetIO().MouseDelta.y / scaleY;
+                    g_SliderVals[5] = (wp.x + width * 0.5f) - startX;
+                    g_SliderVals[6] = (wp.y + height * 0.5f) - startY;
                 }
+            }
             }
             
             ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -2923,7 +2701,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             } else {
                 // Fallback initial
                 char initial[2] = { dispName.empty() ? '?' : dispName[0], '\0' };
-                ImVec2 initSize = ImGui::GetFont()->CalcTextSizeA(36.0f * thScale, FLT_MAX, 0.0f, initial);
+                ImVec2 initSize = hudFont->CalcTextSizeA(36.0f * thScale, FLT_MAX, 0.0f, initial);
                 dl->AddText(hudFont, 36.0f * thScale, ImVec2(iconX + (iconS - initSize.x)*0.5f, iconY + (iconS - initSize.y)*0.5f), IM_COL32(200, 210, 220, (int)(255 * alphaAnim)), initial);
             }
             
@@ -2935,7 +2713,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             float nameY = wp.y + 24.0f * thScale;
             
             char hpText[32]; snprintf(hpText, sizeof(hpText), "%.1f HP", dispHealth);
-            ImVec2 hpTextSize = ImGui::GetFont()->CalcTextSizeA(hpFS, FLT_MAX, 0.0f, hpText);
+            ImVec2 hpTextSize = hudFont->CalcTextSizeA(hpFS, FLT_MAX, 0.0f, hpText);
             
             // Clip name text so it doesn't overlap HP
             float maxNameW = (wp.x + width - 15.0f * thScale - hpTextSize.x - 8.0f * thScale) - textX;
@@ -2984,7 +2762,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             char armorText[32];
             snprintf(armorText, sizeof(armorText), "Armor: %d", dispArmor);
             dl->AddText(hudFont, infoFS, ImVec2(barX, infoY), IM_COL32(160, 200, 255, (int)(200 * alphaAnim)), distText);
-            ImVec2 armorSize = ImGui::GetFont()->CalcTextSizeA(infoFS, FLT_MAX, 0.0f, armorText);
+            ImVec2 armorSize = hudFont->CalcTextSizeA(infoFS, FLT_MAX, 0.0f, armorText);
             dl->AddText(hudFont, infoFS, ImVec2(wp.x + width - 15.0f * thScale - armorSize.x, infoY), IM_COL32(200, 220, 255, (int)(200 * alphaAnim)), armorText);
             
             // Row 2: Ping | Potions
@@ -3005,7 +2783,7 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             
             char potText[32];
             snprintf(potText, sizeof(potText), "Buffs: %d", dispPots);
-            ImVec2 potSize = ImGui::GetFont()->CalcTextSizeA(infoFS, FLT_MAX, 0.0f, potText);
+            ImVec2 potSize = hudFont->CalcTextSizeA(infoFS, FLT_MAX, 0.0f, potText);
             dl->AddText(hudFont, infoFS, ImVec2(wp.x + width - 15.0f * thScale - potSize.x, infoY2), IM_COL32(255, 150, 200, (int)(200 * alphaAnim)), potText);
             
             // Row 3: Held Item
@@ -3042,8 +2820,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             ImGui::PopStyleVar(3);
         }
 
-        // ArrayList (Active Modules) Rendering
-        {
+        // ArrayList (Active Modules) Rendering  Esingle ImGui window path
+        if (g_Toggles[22].value) {
             if (g_SliderVals[20] < 0.0f) g_SliderVals[20] = io.DisplaySize.x - 150.0f; // Default X
             if (g_SliderVals[22] < 0.5f) g_SliderVals[22] = 1.0f; // Default Scale
 
@@ -3077,6 +2855,13 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             }
 
             static bool alDragging = false;
+            ImGuiWindowFlags alFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground;
+            if (!g_HudEditorMode) alFlags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove;
+            else if (alDragging) alFlags |= ImGuiWindowFlags_NoMove;
+
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             
             float globalHudScale = io.DisplaySize.y / 1080.0f;
             if (globalHudScale < 0.4f) globalHudScale = 0.4f;
@@ -3090,87 +2875,30 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
             
             float maxWidth = 0.0f;
             for (auto& m : activeMods) {
-                float w = ImGui::GetFont()->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, m.c_str()).x;
+                float w = hudFont->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, m.c_str()).x;
                 if (w > maxWidth) maxWidth = w;
             }
             float totalWidth = maxWidth + padX * 2.0f + 4.0f * scale;
-            float bannerW = 220.0f * scale;
-            float bannerH = g_BannerW > 0 ? (bannerW * (float)g_BannerH / (float)g_BannerW) : (30.0f * scale);
             
-            float scaleX = io.DisplaySize.x / 1920.0f;
-            float scaleY = io.DisplaySize.y / 1080.0f;
+            float targetX = g_SliderVals[20];
+            float targetY = g_SliderVals[21];
             
-            float targetX = g_SliderVals[20] * scaleX;
-            float targetY = g_SliderVals[21] * scaleY;
-            
-            // Decide which side to anchor: right side of screen = right-aligned (pivotX=1), left = left-aligned (pivotX=0)
-            float pivotX = (g_SliderVals[20] * scaleX > io.DisplaySize.x * 0.5f) ? 1.0f : 0.0f;
-            bool leftSide = (pivotX < 0.5f);
-            
+            if (targetX + totalWidth > io.DisplaySize.x) targetX = io.DisplaySize.x - totalWidth;
             if (targetX < 0) targetX = 0;
-            if (targetX > io.DisplaySize.x) targetX = io.DisplaySize.x;
+            if (targetY + itemH * activeMods.size() > io.DisplaySize.y) targetY = io.DisplaySize.y - itemH * activeMods.size();
             if (targetY < 0) targetY = 0;
-            if (targetY > io.DisplaySize.y) targetY = io.DisplaySize.y;
             
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::SetNextWindowPos(ImVec2(targetX, targetY), ImGuiCond_Always);
             
-            ImGuiWindowFlags bannerFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBackground;
-            if (!g_HudEditorMode) bannerFlags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove;
-            else if (alDragging) bannerFlags |= ImGuiWindowFlags_NoMove;
-            
-            ImGui::SetNextWindowPos(ImVec2(targetX, targetY), ImGuiCond_Always, ImVec2(pivotX, 0.0f));
-            ImGui::SetNextWindowSize(ImVec2(bannerW, bannerH), ImGuiCond_Always);
-            
-            if (ImGui::Begin("BannerWatermark", nullptr, bannerFlags)) {
-                if (g_HudEditorMode && ImGui::IsWindowFocused() && ImGui::IsMouseDragging(0) && !alDragging) {
-                    g_SliderVals[20] += ImGui::GetIO().MouseDelta.x / scaleX;
-                    g_SliderVals[21] += ImGui::GetIO().MouseDelta.y / scaleY;
+            if (ImGui::Begin("ArrayList", nullptr, alFlags)) {
+                if (g_HudEditorMode && ImGui::IsWindowFocused() && ImGui::IsMouseDragging(0)) {
+                    ImVec2 wp = ImGui::GetWindowPos();
+                    g_SliderVals[20] = wp.x;
+                    g_SliderVals[21] = wp.y;
                 }
-                
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImVec2 wp = ImGui::GetWindowPos();
-                
-                if (g_BannerTex) {
-                    // Banner image is always drawn normally (never mirrored).
-                    // The PNG has ~9.5% left padding and ~11% right padding.
-                    // On right side: shift right to align visible right edge with bar.
-                    // On left side: shift left to align visible left edge with bar.
-                    if (leftSide) {
-                        // Left side: shift image left so its visible left edge is at window left
-                        float leftPadFraction = 182.0f / 1920.0f; // measured leftmost pixel
-                        float xOffset = -bannerW * leftPadFraction;
-                        dl->AddImage((void*)(intptr_t)g_BannerTex,
-                            ImVec2(wp.x + xOffset, wp.y), ImVec2(wp.x + bannerW + xOffset, wp.y + bannerH));
-                    } else {
-                        // Right side: shift right so visible right edge aligns with bar
-                        float rightPadFraction = (1920.0f - 1679.0f) / 1920.0f; // measured rightmost pixel
-                        float xOffset = bannerW * rightPadFraction;
-                        dl->AddImage((void*)(intptr_t)g_BannerTex,
-                            ImVec2(wp.x + xOffset, wp.y), ImVec2(wp.x + bannerW + xOffset, wp.y + bannerH));
-                    }
-                } else {
-                    dl->AddText(ImGui::GetFont(), fontSize, ImVec2(wp.x, wp.y), IM_COL32(255, 255, 255, 255), "N1MBUS Preview");
-                }
-            }
-            ImGui::End();
-            
-            if (g_Toggles[22].value) {
-                ImGuiWindowFlags alFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground;
-                if (!g_HudEditorMode) alFlags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove;
-                else if (alDragging) alFlags |= ImGuiWindowFlags_NoMove;
-                
-                // Gap between banner and ArrayList
-                float arrayListStartY = targetY + bannerH;
-                ImGui::SetNextWindowPos(ImVec2(targetX, arrayListStartY), ImGuiCond_Always, ImVec2(pivotX, 0.0f));
-                if (ImGui::Begin("ArrayList", nullptr, alFlags)) {
-                    if (g_HudEditorMode && ImGui::IsWindowFocused() && ImGui::IsMouseDragging(0) && !alDragging) {
-                        g_SliderVals[20] += ImGui::GetIO().MouseDelta.x / scaleX;
-                        g_SliderVals[21] += ImGui::GetIO().MouseDelta.y / scaleY;
-                    }
-                    // scale is already scaled by globalHudScale
-                    float fontSize = 28.0f * scale;
+
+                float scale = g_SliderVals[22];
+                float fontSize = 28.0f * scale;
                 float padX = 8.0f * scale;
                 float padY = 4.0f * scale;
                 float itemH = fontSize + padY * 2.0f;
@@ -3195,64 +2923,33 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
 
                     ImGui::Dummy(ImVec2(contentW + barW, totalH));
                     ImVec2 rMin2 = ImGui::GetItemRectMin();
+                    // Background ends at bgRight; bar spans bgRight to barRight
+                    float bgRight = rMin2.x + contentW;
+                    float barRight = bgRight + barW;
                     ImDrawList* dl = ImGui::GetWindowDrawList();
-                    // When left-side: bar is on LEFT, items grow right
-                    // When right-side (default): bar is on RIGHT, items grow left
-                    float barLeft, barRight2, bgLeft, bgRight;
-                    if (leftSide) {
-                        barLeft  = rMin2.x;
-                        barRight2 = barLeft + barW;
-                        bgLeft   = barRight2;
-                        bgRight  = bgLeft + contentW;
-                    } else {
-                        barLeft  = rMin2.x + contentW;
-                        barRight2 = barLeft + barW;
-                        bgLeft   = rMin2.x;
-                        bgRight  = bgLeft + contentW;
-                    }
 
                     // Pass 1: Per-item backgrounds (stop BEFORE bar area)
                     for (int j = 0; j < n; j++) {
+                        // Slide the new entry in from the right + fade
                         float prog = alSlideProg[activeMods[j]];
                         int slideA = (int)(255.0f * prog);
+                        float slideOff = (1.0f - prog) * (contentW + barW);
+
                         float w = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j].c_str()).x;
+                        float bLeft = rMin2.x + maxWidth - w + slideOff;
                         float itemTop = rMin2.y + (float)j * itemH;
 
-                        float bLeft, bRight;
-                        if (leftSide) {
-                            // Slide in from left. Items are right-justified within the window (longest at right)
-                            float slideOff = (1.0f - prog) * (contentW + barW);
-                            bLeft  = bgLeft;
-                            bRight = bgLeft + w + padX * 2.0f - slideOff;
-                            if (bRight < bgLeft) bRight = bgLeft;
-                        } else {
-                            // Slide in from right (original behavior)
-                            float slideOff = (1.0f - prog) * (contentW + barW);
-                            bLeft  = bgLeft + maxWidth - w + slideOff;
-                            bRight = bgRight;
-                        }
-
                         ImDrawFlags bgFlags = ImDrawFlags_RoundCornersNone;
-                        if (leftSide) {
-                            if (j == 0) bgFlags |= ImDrawFlags_RoundCornersTopRight;
-                            if (j == n - 1) {
-                                bgFlags |= ImDrawFlags_RoundCornersBottomRight;
-                            } else {
-                                float nextW = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j+1].c_str()).x;
-                                if (w - nextW > rounding) bgFlags |= ImDrawFlags_RoundCornersBottomRight;
-                            }
+                        if (j == 0) bgFlags |= ImDrawFlags_RoundCornersTopLeft;
+                        if (j == n - 1) {
+                            bgFlags |= ImDrawFlags_RoundCornersBottomLeft;
                         } else {
-                            if (j == 0) bgFlags |= ImDrawFlags_RoundCornersTopLeft;
-                            if (j == n - 1) {
-                                bgFlags |= ImDrawFlags_RoundCornersBottomLeft;
-                            } else {
-                                float nextW = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j+1].c_str()).x;
-                                if (w - nextW > rounding) bgFlags |= ImDrawFlags_RoundCornersBottomLeft;
-                            }
+                            float nextW = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j+1].c_str()).x;
+                            if (w - nextW > rounding) bgFlags |= ImDrawFlags_RoundCornersBottomLeft;
                         }
 
                         dl->AddRectFilled(
-                            ImVec2(bLeft, itemTop), ImVec2(bRight, itemTop + itemH),
+                            ImVec2(bLeft, itemTop), ImVec2(bgRight, itemTop + itemH),
                             IM_COL32(18, 18, 18, (int)(190.0f * prog)), rounding, bgFlags);
                     }
 
@@ -3267,18 +2964,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                         float slideOff = (1.0f - prog) * (contentW + barW);
 
                         float w = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, activeMods[j].c_str()).x;
+                        float bLeft = rMin2.x + maxWidth - w + slideOff;
                         float itemTop = rMin2.y + (float)j * itemH;
-                        float bLeft, textX;
-                        if (leftSide) {
-                            float slideOff = (1.0f - prog) * (contentW + barW);
-                            bLeft = bgLeft;
-                            float bRight = bgLeft + w + padX * 2.0f - slideOff;
-                            textX = bLeft + padX;
-                        } else {
-                            float slideOff = (1.0f - prog) * (contentW + barW);
-                            bLeft = bgLeft + maxWidth - w + slideOff;
-                            textX = bLeft + padX;
-                        }
                         
                         ImU32 txtColor;
                         if (rainbowMode) {
@@ -3297,20 +2984,18 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                             ImVec4& base = *(ImVec4*)g_ArrayListColors[0];
                             txtColor = IM_COL32((int)(base.x*255), (int)(base.y*255), (int)(base.z*255), slideA);
                         }
-                        dl->AddText(font, fontSize, ImVec2(textX, itemTop + padY), txtColor, activeMods[j].c_str());
+                        dl->AddText(font, fontSize, ImVec2(bLeft + padX, itemTop + padY), txtColor, activeMods[j].c_str());
                         
-                        // Draw color bar - left side when on left, right side when on right
+                        // Draw right color bar per-item so it perfectly matches the gradient and animations!
                         ImDrawFlags barFlags = 0;
+                        if (j == 0) barFlags |= ImDrawFlags_RoundCornersTopRight;
+                        if (j == n - 1) barFlags |= ImDrawFlags_RoundCornersBottomRight;
+                        
+                        // Force alpha 255 for the solid bar
                         ImU32 barColor = (txtColor & 0x00FFFFFF) | IM_COL32(0,0,0, (int)(255 * prog));
-                        if (leftSide) {
-                            if (j == 0) barFlags |= ImDrawFlags_RoundCornersTopLeft;
-                            if (j == n - 1) barFlags |= ImDrawFlags_RoundCornersBottomLeft;
-                            dl->AddRectFilled(ImVec2(barLeft, itemTop), ImVec2(barRight2, itemTop + itemH), barColor, rounding, barFlags);
-                        } else {
-                            if (j == 0) barFlags |= ImDrawFlags_RoundCornersTopRight;
-                            if (j == n - 1) barFlags |= ImDrawFlags_RoundCornersBottomRight;
-                            dl->AddRectFilled(ImVec2(barLeft, itemTop), ImVec2(barRight2, itemTop + itemH), barColor, rounding, barFlags);
-                        }
+                        dl->AddRectFilled(
+                            ImVec2(bgRight, itemTop), ImVec2(barRight, itemTop + itemH),
+                            barColor, rounding, barFlags);
                     }
                 }
 
@@ -3340,7 +3025,6 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                 }
             }
             ImGui::End();
-            }
             ImGui::PopStyleVar(2);
             ImGui::PopStyleColor();
         }
@@ -3747,17 +3431,6 @@ if (g_ExpandAnims[2] > 0.01f) {
                             StyledCombo("Mode", &g_ComboSelections[0], auraMode, 3, ea, 0); ImGui::Spacing();
                             static const char* auraPriority[] = { "Distance", "Health", "Angle" };
                             StyledCombo("Priority", &g_ComboSelections[1], auraPriority, 3, ea, 1); ImGui::Spacing();
-
-                              static const char* auraTargets[] = { "Players", "Hostile Mobs", "Neutral/Passive" };
-                              KillAura* ka = (KillAura*)ModuleManager::get().find("KillAura");
-                              bool targetStates[3] = { ka->targetPlayers, ka->targetHostiles, ka->targetPassives };
-                              if (StyledMultiCombo("Targets", targetStates, auraTargets, 3, ea, 8)) {
-                                  ka->targetPlayers = targetStates[0];
-                                  ka->targetHostiles = targetStates[1];
-                                  ka->targetPassives = targetStates[2];
-                              }
-                              ImGui::Spacing();
-
                             AnimatedSlider("Reach", &g_SliderVals[0], 3.0f, 6.0f, "%.1f blocks", dt, ea); ImGui::Spacing();
                             AnimatedRangeSlider("CPS", &g_SliderVals[16], &g_SliderVals[17], 1.0f, 25.0f, "%.0f - %.0f", dt, ea); ImGui::Spacing();
                             AnimatedSlider("FOV", &g_SliderVals[18], 10.0f, 360.0f, "%.0f deg", dt, ea); ImGui::Spacing();
@@ -3972,7 +3645,7 @@ ImGui::Spacing();
                         std::vector<const char*> matchedSettings_13;
                         if (!searching || ModuleMatches("Flight", {"Fly Mode", "Speed"}, matchedSettings_13)) {
 
-                        WIDGET_ANIM(1) AnimatedExpandableToggle("Flight [Unsafe]", g_Toggles[5], dt, wAlpha1, &g_ExpandStates[1], &g_ExpandAnims[1]);
+                        WIDGET_ANIM(1) AnimatedExpandableToggle("Flight", g_Toggles[5], dt, wAlpha1, &g_ExpandStates[1], &g_ExpandAnims[1]);
                         MODULE_BIND(1, "Fly");
                         
                         if (searching && !matchedSettings_13.empty()) {
@@ -4013,7 +3686,7 @@ if (g_ExpandAnims[1] > 0.01f) {
                         std::vector<const char*> matchedSettings_15;
                         if (!searching || ModuleMatches("Speed", {"Mode", "Multiplier"}, matchedSettings_15)) {
 
-                        WIDGET_ANIM(2) AnimatedExpandableToggle("Speed [Unsafe]", g_Toggles[18], dt, wAlpha2, &g_ExpandStates[4], &g_ExpandAnims[4]);
+                        WIDGET_ANIM(2) AnimatedExpandableToggle("Speed", g_Toggles[18], dt, wAlpha2, &g_ExpandStates[4], &g_ExpandAnims[4]);
                         MODULE_BIND(2, "Speed");
                         
                         if (searching && !matchedSettings_15.empty()) {
@@ -4331,7 +4004,7 @@ if (g_ExpandAnims[3] > 0.01f) {
                         std::vector<const char*> matchedSettings_33;
                         if (!searching || ModuleMatches("PlayerModel", {"Scale"}, matchedSettings_33)) {
 
-                        WIDGET_ANIM(4) AnimatedExpandableToggle("PlayerModel [Bugged]", g_Toggles[34], dt, wAlpha4, &g_ExpandStates[13], &g_ExpandAnims[13]);
+                        WIDGET_ANIM(4) AnimatedExpandableToggle("PlayerModel", g_Toggles[34], dt, wAlpha4, &g_ExpandStates[13], &g_ExpandAnims[13]);
                         MODULE_BIND(4, "PlayerModel");
                         
                         if (searching && !matchedSettings_33.empty()) {
@@ -4411,7 +4084,7 @@ ImGui::Spacing();
                         std::vector<const char*> matchedSettings_41;
                         if (!searching || ModuleMatches("BedBreaker", {"Radius"}, matchedSettings_41)) {
 
-                        WIDGET_ANIM(4) AnimatedExpandableToggle("BedBreaker [Unsafe]", g_Toggles[25], dt, wAlpha4, &g_ExpandStates[11], &g_ExpandAnims[11]);
+                        WIDGET_ANIM(4) AnimatedExpandableToggle("BedBreaker", g_Toggles[25], dt, wAlpha4, &g_ExpandStates[11], &g_ExpandAnims[11]);
                         MODULE_BIND(4, "BedBreaker");
                         
                         if (searching && !matchedSettings_41.empty()) {
@@ -4647,27 +4320,6 @@ if (g_ExpandAnims[12] > 0.01f) {
                                                 if (env->ExceptionCheck()) env->ExceptionClear();
                                             }
 
-                                            // Sample world depth at entity center BEFORE clearing.
-                                            // In OpenGL, Y is flipped: viewport y 0 = bottom of screen.
-                                            int sampleX = g_PlayerModelPosX;
-                                            int sampleY = last_viewport[3] - g_PlayerModelPosY;
-                                            if (sampleX < 0) sampleX = 0;
-                                            if (sampleX >= last_viewport[2]) sampleX = last_viewport[2] - 1;
-                                            if (sampleY < 0) sampleY = 0;
-                                            if (sampleY >= last_viewport[3]) sampleY = last_viewport[3] - 1;
-                                            float worldDepth = 1.0f;
-                                            glReadPixels(sampleX, sampleY, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &worldDepth);
-                                            
-                                            // If world depth < 0.98, a solid block is in front of the entity position.
-                                            // Skip rendering to avoid x-ray effect.
-                                            if (worldDepth < 0.98f) {
-                                                env->DeleteLocalRef(guiInvClass);
-                                                env->DeleteLocalRef(playerObj);
-                                                env->DeleteLocalRef(mcObj);
-                                                env->DeleteLocalRef(mcClass);
-                                                goto skip_player_model;
-                                            }
-                                            
                                             glPushAttrib(GL_ALL_ATTRIB_BITS);
                                             glPushMatrix();
                                             
@@ -4676,10 +4328,8 @@ if (g_ExpandAnims[12] > 0.01f) {
                                             glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
                                             glDisable(GL_BLEND);
                                             glUseProgram(0);
-                                            // Clear depth buffer so the entity renders as a clean HUD element.
-                                            // This matches how Minecraft renders drawEntityOnScreen in GUI/chat context.
+                                            // Clear stale world depth so the model only self-occludes.
                                             glEnable(GL_DEPTH_TEST);
-                                            glDepthMask(GL_TRUE);
                                             glDepthFunc(GL_LEQUAL);
                                             glClearDepth(1.0);
                                             glClear(GL_DEPTH_BUFFER_BIT);
@@ -4719,7 +4369,6 @@ if (g_ExpandAnims[12] > 0.01f) {
                 }
             }
         }
-        skip_player_model:;
 
         ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         
@@ -4819,9 +4468,4 @@ void N1mbusHook::Uninitialize() {
         if (g_hWnd && o_WndProc) SetWindowLongPtr(g_hWnd, GWLP_WNDPROC, (LONG_PTR)o_WndProc);
     }
 }
-
-
-
-
-
 

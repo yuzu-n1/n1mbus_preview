@@ -35,6 +35,9 @@ public:
     bool  autoDisable     = false;
     int   autoDisableTime = 2000; // ms
     bool  teams           = false;
+    bool  targetPlayers    = true;
+    bool  targetHostiles   = false;
+    bool  targetPassives   = false;
 
     KillAura() : Module("KillAura") {}
 
@@ -176,7 +179,27 @@ public:
 
             if (env->IsSameObject(entObj, playerObj)) { env->DeleteLocalRef(entObj); continue; }
             if (!env->IsInstanceOf(entObj, livingClass)) { env->DeleteLocalRef(entObj); continue; }
-            if (!env->IsInstanceOf(entObj, playerCls)) { env->DeleteLocalRef(entObj); continue; }
+            
+            jclass mobCls      = JniManager::FindClassWithLoader(env, "net/minecraft/entity/monster/IMob");
+            jclass animalCls   = JniManager::FindClassWithLoader(env, "net/minecraft/entity/passive/IAnimals");
+            jclass villagerCls = JniManager::FindClassWithLoader(env, "net/minecraft/entity/passive/EntityVillager");
+            jclass batCls      = JniManager::FindClassWithLoader(env, "net/minecraft/entity/passive/EntityBat");
+            jclass squidCls    = JniManager::FindClassWithLoader(env, "net/minecraft/entity/passive/EntitySquid");
+
+            bool isPlayer = env->IsInstanceOf(entObj, playerCls);
+            bool isHostile = (mobCls && env->IsInstanceOf(entObj, mobCls));
+            bool isPassive = (animalCls && env->IsInstanceOf(entObj, animalCls)) ||
+                             (villagerCls && env->IsInstanceOf(entObj, villagerCls)) ||
+                             (batCls && env->IsInstanceOf(entObj, batCls)) ||
+                             (squidCls && env->IsInstanceOf(entObj, squidCls));
+
+            if (!isPlayer && !isHostile && !isPassive) {
+                env->DeleteLocalRef(entObj);
+                continue;
+            }
+            if (isPlayer && !targetPlayers) { env->DeleteLocalRef(entObj); continue; }
+            if (isHostile && !targetHostiles) { env->DeleteLocalRef(entObj); continue; }
+            if (isPassive && !targetPassives) { env->DeleteLocalRef(entObj); continue; }
             
             if (teams && MappingResolver::CallIsOnSameTeam(env, playerObj, entObj, entityClass)) {
                 env->DeleteLocalRef(entObj);
