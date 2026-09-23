@@ -3088,15 +3088,8 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     // Header background
                     ImU32 hGradT = IM_COL32(8, 14, 18, (int)(245 * MAlpha));
                     ImU32 hGradB = IM_COL32(8, 14, 18, 0);
-                    // Solid rounded top part for smooth corners
-                    dl->AddRectFilled(
-                        ImVec2(wp.x + sidebarW, wp.y),
-                        ImVec2(wp.x + ws.x, wp.y + 10.0f),
-                        hGradT, 10.0f, ImDrawFlags_RoundCornersTopRight
-                    );
-                    // Gradient fade below
                     dl->AddRectFilledMultiColor(
-                        ImVec2(wp.x + sidebarW, wp.y + 10.0f),
+                        ImVec2(wp.x + sidebarW, wp.y),
                         ImVec2(wp.x + ws.x, wp.y + 85.0f),
                         hGradT, hGradT, hGradB, hGradB
                     );
@@ -3239,16 +3232,15 @@ BOOL WINAPI hk_wglSwapBuffers(HDC hDc) {
                     };
                     bool searching = g_SearchBuffer[0] != '\0';
 
-                    ImGui::SetCursorPos(ImVec2(45, 38));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 8));
+                    ImGui::SetCursorPos(ImVec2(ws.x - sidebarW - 170, 105));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(15, 20, 25, (int)(255 * contentAlpha)));
                     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 200, 200, (int)(255 * contentAlpha)));
-                    ImGui::PushItemWidth(340.0f);
+                    ImGui::PushItemWidth(140.0f);
                     ImGui::InputTextWithHint("##SearchMods", "Search modules...", g_SearchBuffer, sizeof(g_SearchBuffer));
                     ImGui::PopItemWidth();
                     ImGui::PopStyleColor(2);
-                    ImGui::PopStyleVar(2);
+                    ImGui::PopStyleVar();
 
                     ImGui::SetCursorPos(ImVec2(45, 155));
                     ImGui::BeginGroup();
